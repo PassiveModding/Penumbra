@@ -5,6 +5,14 @@ using OtterGui.Raii;
 using OtterGui;
 using Penumbra.Interop.ResourceTree;
 using Penumbra.UI.Classes;
+using System.Text.Json;
+using Penumbra.Services;
+using Dalamud.Plugin.Services;
+using Lumina.Data;
+using System;
+using Xande.Files;
+using Xande.Havok;
+using Xande;
 
 namespace Penumbra.UI.AdvancedWindow;
 
@@ -21,12 +29,14 @@ public class ResourceTreeViewer
     private readonly int                           _actionCapacity;
     private readonly Action                        _onRefresh;
     private readonly Action<ResourceNode, Vector2> _drawActions;
+    private readonly DalamudServices _dalamud;
     private readonly HashSet<nint>                 _unfolded;
-
+    private readonly ModelExporter _modelExporter;
+    private readonly IPluginLog _log;
     private Task<ResourceTree[]>? _task;
 
     public ResourceTreeViewer(Configuration config, ResourceTreeFactory treeFactory, ChangedItemDrawer changedItemDrawer,
-        int actionCapacity, Action onRefresh, Action<ResourceNode, Vector2> drawActions)
+        int actionCapacity, Action onRefresh, Action<ResourceNode, Vector2> drawActions, DalamudServices dalamud)
     {
         _config            = config;
         _treeFactory       = treeFactory;
@@ -34,6 +44,9 @@ public class ResourceTreeViewer
         _actionCapacity    = actionCapacity;
         _onRefresh         = onRefresh;
         _drawActions       = drawActions;
+        _dalamud = dalamud;
+        _modelExporter = new ModelExporter(dalamud);
+        _log = dalamud.Log;
         _unfolded          = new HashSet<nint>();
     }
 
@@ -84,6 +97,12 @@ public class ResourceTreeViewer
 
                 ImGui.TextUnformatted($"Collection: {tree.CollectionName}");
 
+                // export character button 
+                if (ImGui.Button("Export Character"))
+                {
+                    RunModelExport(tree);
+                }
+
                 using var table = ImRaii.Table("##ResourceTree", _actionCapacity > 0 ? 4 : 3,
                     ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg);
                 if (!table)
@@ -100,6 +119,86 @@ public class ResourceTreeViewer
                 DrawNodes(tree.Nodes, 0, unchecked(tree.DrawObjectAddress * 31));
             }
         }
+    }
+
+    private void RunModelExport(ResourceTree tree)
+    {
+        var path = Path.Combine(Path.GetTempPath(), "Penumbra.XandeTest");
+        Directory.CreateDirectory(path);
+        path = Path.Combine(path, $"{tree.Name}-{DateTime.Now:yyyy-MM-dd-HH-mm-ss}");
+        Directory.CreateDirectory(path);
+        var fileName = $"{tree.Name}.json";
+        var filePath = Path.Combine(path, fileName);
+
+        var json = JsonSerializer.Serialize(tree.Nodes.Select(GetResourceNodeAsJson), new JsonSerializerOptions
+        {
+            WriteIndented = true
+        });
+
+        File.WriteAllText(filePath, json);
+
+        _dalamud.Framework.RunOnTick(() =>
+        {
+            _log.Debug($"Exporting character to {path}");
+            // skeletons should only be at the root level so no need to go further
+            var skeletonNodes = tree.Nodes.Where(x => x.Type == Api.Enums.ResourceType.Sklb).ToList();
+            var skeletons = new List<HavokXml>();
+            try
+            {
+
+                foreach (var node in skeletonNodes)
+                {
+                    // cannot use fullpath because things like ivcs are fucky and crash the game
+                    var path = node.GamePath.ToString();
+                    try
+                    {
+                        var file = _modelExporter.LuminaManager.GetFile<FileResource>(path);
+                        var sklb = SklbFile.FromStream(file.Reader.BaseStream);
+
+                        var xml = _modelExporter.Converter.HkxToXml(sklb.HkxData);
+                        skeletons.Add(new HavokXml(xml));
+                        _log.Debug($"Loaded skeleton {path}");
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Error(ex, $"Failed loading skeleton {path}");
+                        throw;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "Error loading skeletons");
+                return Task.CompletedTask;
+            }
+
+
+            return Task.Run(async () => {
+                    try
+                    {
+                        await _modelExporter.ExportModel(path, skeletons, tree.Nodes);
+                        // open path 
+                        Process.Start("explorer.exe", path);
+                    }
+                    catch (Exception e)
+                    {
+                        _log.Error(e, "Error while exporting character");
+                    }
+                });
+        });
+    }
+
+    private object GetResourceNodeAsJson(ResourceNode node)
+    {
+          return new
+          {
+                node.Name,
+                Type = node.Type.ToString(),
+                GamePath = node.GamePath.ToString(),
+                node.FullPath.FullName,
+                node.Internal,
+                Children = node.Children.Select(GetResourceNodeAsJson)
+          };
     }
 
     private Task<ResourceTree[]> RefreshCharacterList()

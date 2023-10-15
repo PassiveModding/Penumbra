@@ -14,3 +14,6 @@
 	path = Penumbra.GameData
 	url = https://github.com/Ottermandias/Penumbra.GameData.git
 	branch = main
+[submodule "Xande"]
+	path = Xande
+	url = https://github.com/xivdev/Xande.git

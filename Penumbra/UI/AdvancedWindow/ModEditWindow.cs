@@ -580,7 +580,7 @@ public partial class ModEditWindow : Window, IDisposable
         _textureSelectCombo  = new TextureDrawer.PathSelectCombo(textures, editor);
         _resourceTreeFactory = resourceTreeFactory;
         _quickImportViewer   =
-            new ResourceTreeViewer(_config, resourceTreeFactory, changedItemDrawer, 2, OnQuickImportRefresh, DrawQuickImportActions);
+            new ResourceTreeViewer(_config, resourceTreeFactory, changedItemDrawer, 2, OnQuickImportRefresh, DrawQuickImportActions, dalamud);
         _communicator.ModPathChanged.Subscribe(OnModPathChanged, ModPathChanged.Priority.ModEditWindow);
     }
 
