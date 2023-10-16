@@ -21,14 +21,14 @@ public class ResourceTreeViewer
         ResourceTreeFactory.Flags.WithUiData |
         ResourceTreeFactory.Flags.WithOwnership;
 
-    private readonly Configuration                 _config;
-    private readonly ResourceTreeFactory           _treeFactory;
-    private readonly ChangedItemDrawer             _changedItemDrawer;
-    private readonly int                           _actionCapacity;
-    private readonly Action                        _onRefresh;
+    private readonly Configuration _config;
+    private readonly ResourceTreeFactory _treeFactory;
+    private readonly ChangedItemDrawer _changedItemDrawer;
+    private readonly int _actionCapacity;
+    private readonly Action _onRefresh;
     private readonly Action<ResourceNode, Vector2> _drawActions;
     private readonly DalamudServices _dalamud;
-    private readonly HashSet<nint>                 _unfolded;
+    private readonly HashSet<nint> _unfolded;
     private readonly ModelExporter _modelExporter;
     private readonly IPluginLog _log;
     private Task<ResourceTree[]>? _task;
@@ -36,17 +36,20 @@ public class ResourceTreeViewer
     public ResourceTreeViewer(Configuration config, ResourceTreeFactory treeFactory, ChangedItemDrawer changedItemDrawer,
         int actionCapacity, Action onRefresh, Action<ResourceNode, Vector2> drawActions, DalamudServices dalamud)
     {
-        _config            = config;
-        _treeFactory       = treeFactory;
+        _config = config;
+        _treeFactory = treeFactory;
         _changedItemDrawer = changedItemDrawer;
-        _actionCapacity    = actionCapacity;
-        _onRefresh         = onRefresh;
-        _drawActions       = drawActions;
+        _actionCapacity = actionCapacity;
+        _onRefresh = onRefresh;
+        _drawActions = drawActions;
         _dalamud = dalamud;
         _modelExporter = new ModelExporter(dalamud);
         _log = dalamud.Log;
-        _unfolded          = new HashSet<nint>();
+        _unfolded = new HashSet<nint>();
+        _log.Debug("Initialized ResourceTreeViewer");
     }
+
+    private static bool IsExporting;
 
     public void Draw()
     {
@@ -75,8 +78,8 @@ public class ResourceTreeViewer
             {
                 var headerColorId =
                     tree.LocalPlayerRelated ? ColorId.ResTreeLocalPlayer :
-                    tree.PlayerRelated      ? ColorId.ResTreePlayer :
-                    tree.Networked          ? ColorId.ResTreeNetworked :
+                    tree.PlayerRelated ? ColorId.ResTreePlayer :
+                    tree.Networked ? ColorId.ResTreeNetworked :
                     ColorId.ResTreeNonNetworked;
                 using (var c = ImRaii.PushColor(ImGuiCol.Text, headerColorId.Value()))
                 {
@@ -96,9 +99,35 @@ public class ResourceTreeViewer
                 ImGui.TextUnformatted($"Collection: {tree.CollectionName}");
 
                 // export character button 
-                if (ImGui.Button("Export Character"))
+                if (IsExporting)
                 {
-                    RunModelExport(tree);
+                    ImGui.TextUnformatted("Exporting character");
+                    if (ImGui.Button("Cancel Export"))
+                    {
+                        if (Cts != null)
+                        {
+                            Cts.Cancel();
+                            Cts = null;
+                            _log.Debug("Cancelled export");
+                        }
+                    }
+                }
+                else
+                {
+                    if (ImGui.Button("Export Character"))
+                    {
+                        try
+                        {
+                            IsExporting = true;
+                            Cts = new CancellationTokenSource();
+                            RunModelExport(tree);
+                        }
+                        catch (Exception e)
+                        {
+                            IsExporting = false;
+                            _log.Error(e, "Error while exporting character");
+                        }
+                    }
                 }
 
                 using var table = ImRaii.Table("##ResourceTree", _actionCapacity > 0 ? 4 : 3,
@@ -106,8 +135,8 @@ public class ResourceTreeViewer
                 if (!table)
                     continue;
 
-                ImGui.TableSetupColumn(string.Empty,  ImGuiTableColumnFlags.WidthStretch, 0.2f);
-                ImGui.TableSetupColumn("Game Path",   ImGuiTableColumnFlags.WidthStretch, 0.3f);
+                ImGui.TableSetupColumn(string.Empty, ImGuiTableColumnFlags.WidthStretch, 0.2f);
+                ImGui.TableSetupColumn("Game Path", ImGuiTableColumnFlags.WidthStretch, 0.3f);
                 ImGui.TableSetupColumn("Actual Path", ImGuiTableColumnFlags.WidthStretch, 0.5f);
                 if (_actionCapacity > 0)
                     ImGui.TableSetupColumn(string.Empty, ImGuiTableColumnFlags.WidthFixed,
@@ -118,6 +147,8 @@ public class ResourceTreeViewer
             }
         }
     }
+
+    private static CancellationTokenSource? Cts = null;
 
     private void RunModelExport(ResourceTree tree)
     {
@@ -186,36 +217,40 @@ public class ResourceTreeViewer
             catch (Exception ex)
             {
                 _log.Error(ex, "Error loading skeletons");
+                IsExporting = false;
                 return Task.CompletedTask;
             }
 
 
-            return Task.Run(async () => {
-                    try
-                    {
-                        await _modelExporter.ExportModel(path, skeletons, tree.Nodes);
-                        // open path 
-                        Process.Start("explorer.exe", path);
-                    }
-                    catch (Exception e)
-                    {
-                        _log.Error(e, "Error while exporting character");
-                    }
-                });
+            return Task.Run(async () =>
+            {
+                try
+                {
+                    await _modelExporter.ExportModel(path, skeletons, tree.Nodes, Cts.Token);
+                    // open path 
+                    Process.Start("explorer.exe", path);
+                }
+                catch (Exception e)
+                {
+                    _log.Error(e, "Error while exporting character");
+                }
+
+                IsExporting = false;
+            }, Cts.Token);
         });
     }
 
     private object GetResourceNodeAsJson(ResourceNode node)
     {
-          return new
-          {
-                node.Name,
-                Type = node.Type.ToString(),
-                GamePath = node.GamePath.ToString(),
-                node.FullPath.FullName,
-                node.Internal,
-                Children = node.Children.Select(GetResourceNodeAsJson)
-          };
+        return new
+        {
+            node.Name,
+            Type = node.Type.ToString(),
+            GamePath = node.GamePath.ToString(),
+            node.FullPath.FullName,
+            node.Internal,
+            Children = node.Children.Select(GetResourceNodeAsJson)
+        };
     }
 
     private Task<ResourceTree[]> RefreshCharacterList()
@@ -236,15 +271,15 @@ public class ResourceTreeViewer
 
     private void DrawNodes(IEnumerable<ResourceNode> resourceNodes, int level, nint pathHash)
     {
-        var debugMode   = _config.DebugMode;
+        var debugMode = _config.DebugMode;
         var frameHeight = ImGui.GetFrameHeight();
-        var cellHeight  = _actionCapacity > 0 ? frameHeight : 0.0f;
+        var cellHeight = _actionCapacity > 0 ? frameHeight : 0.0f;
         foreach (var (resourceNode, index) in resourceNodes.WithIndex())
         {
             if (resourceNode.Internal && !debugMode)
                 continue;
 
-            var textColor         = ImGui.GetColorU32(ImGuiCol.Text);
+            var textColor = ImGui.GetColorU32(ImGuiCol.Text);
             var textColorInternal = (textColor & 0x00FFFFFFu) | ((textColor & 0xFE000000u) >> 1); // Half opacity
 
             using var mutedColor = ImRaii.PushColor(ImGuiCol.Text, textColorInternal, resourceNode.Internal);
@@ -261,9 +296,9 @@ public class ResourceTreeViewer
                     : resourceNode.Children.Any(child => !child.Internal);
                 if (unfoldable)
                 {
-                    using var font   = ImRaii.PushFont(UiBuilder.IconFont);
-                    var       icon   = (unfolded ? FontAwesomeIcon.CaretDown : FontAwesomeIcon.CaretRight).ToIconString();
-                    var       offset = (ImGui.GetFrameHeight() - ImGui.CalcTextSize(icon).X) / 2;
+                    using var font = ImRaii.PushFont(UiBuilder.IconFont);
+                    var icon = (unfolded ? FontAwesomeIcon.CaretDown : FontAwesomeIcon.CaretRight).ToIconString();
+                    var offset = (ImGui.GetFrameHeight() - ImGui.CalcTextSize(icon).X) / 2;
                     ImGui.SetCursorPosX(ImGui.GetCursorPosX() + offset);
                     ImGui.TextUnformatted(icon);
                     ImGui.SameLine(0f, offset + ImGui.GetStyle().ItemInnerSpacing.X);

@@ -1,4 +1,5 @@
-﻿using System.Drawing;
+﻿using System;
+using System.Drawing;
 using System.Drawing.Imaging;
 using Dalamud.Plugin.Services;
 using Lumina.Data;
@@ -81,7 +82,7 @@ public class ModelExporter
 
     private static SemaphoreSlim _semaphore = new(1, 1);
 
-    public async Task ExportModel(string exportPath, IEnumerable<HavokXml> skeletons, List<ResourceNode> nodes)
+    public async Task ExportModel(string exportPath, IEnumerable<HavokXml> skeletons, List<ResourceNode> nodes, CancellationToken cancellationToken = default)
     {
         _log.Debug($"Exporting model to {exportPath}");
 
@@ -91,7 +92,7 @@ public class ModelExporter
             return;
         }
 
-        await _semaphore.WaitAsync();
+        await _semaphore.WaitAsync(cancellationToken);
 
         try
         {
@@ -122,23 +123,23 @@ public class ModelExporter
             var modelTasks = new List<Task>();
             foreach (var node in modelNodes)
             {
-                modelTasks.Add(HandleModel(node, raceDeformer, deform, exportPath, boneMap, joints, glTFScene));
+                modelTasks.Add(HandleModel(node, raceDeformer, deform, exportPath, boneMap, joints, glTFScene, cancellationToken));
             }
 
             await Task.WhenAll(modelTasks);
 
             var glTFModel = glTFScene.ToGltf2();
-            var waveFrontFolder = Path.Combine(exportPath, "wavefront");
-            Directory.CreateDirectory(waveFrontFolder);
-            glTFModel.SaveAsWavefront(Path.Combine(waveFrontFolder, "wavefront.obj"));
+            //var waveFrontFolder = Path.Combine(exportPath, "wavefront");
+            //Directory.CreateDirectory(waveFrontFolder);
+            //glTFModel.SaveAsWavefront(Path.Combine(waveFrontFolder, "wavefront.obj"));
 
             var glTFFolder = Path.Combine(exportPath, "gltf");
             Directory.CreateDirectory(glTFFolder);
             glTFModel.SaveGLTF(Path.Combine(glTFFolder, "gltf.gltf"));
 
-            var glbFolder = Path.Combine(exportPath, "glb");
-            Directory.CreateDirectory(glbFolder);
-            glTFModel.SaveGLB(Path.Combine(glbFolder, "glb.glb"));
+            //var glbFolder = Path.Combine(exportPath, "glb");
+            //Directory.CreateDirectory(glbFolder);
+            //glTFModel.SaveGLB(Path.Combine(glbFolder, "glb.glb"));
 
             _log.Debug($"Exported model to {exportPath}");
         } 
@@ -200,7 +201,7 @@ public class ModelExporter
         return d[n, m];
     }
 
-    private async Task HandleModel(ResourceNode node, RaceDeformer raceDeformer, ushort? deform, string exportPath, Dictionary<string, NodeBuilder> boneMap, NodeBuilder[] joints, SceneBuilder glTFScene)
+    private async Task HandleModel(ResourceNode node, RaceDeformer raceDeformer, ushort? deform, string exportPath, Dictionary<string, NodeBuilder> boneMap, NodeBuilder[] joints, SceneBuilder glTFScene, CancellationToken cancellationToken)
     {
         var path = node.FullPath.ToPath();
         var file = LuminaManager.GetFile<FileResource>(path);
@@ -225,51 +226,57 @@ public class ModelExporter
         var meshes = model.Meshes.Where(x => x.Types.Contains(Mesh.MeshType.Main)).ToArray();
         var nodeChildren = node.Children.ToList();
 
-        var textureTasks = new List<Task>();
         var materials = new List<(string fullpath, string gamepath, MaterialBuilder material)>();
         foreach (var child in nodeChildren)
         {
-            textureTasks.Add(Task.Run(() =>
+            if (child == null)
             {
-                if (child.Type != Api.Enums.ResourceType.Mtrl)
+                continue;
+            }
+
+            if (child.Type != Api.Enums.ResourceType.Mtrl)
+            {
+                continue;
+            }
+
+            Material? material = null;
+            MtrlFile? mtrlFile = null;
+            try
+            {
+                mtrlFile = Path.IsPathRooted(child.FullPath.ToPath())
+                   ? LuminaManager.GameData.GetFileFromDisk<MtrlFile>(child.FullPath.ToPath(), child.GamePath.ToString())
+                   : LuminaManager.GameData.GetFile<MtrlFile>(child.FullPath.ToPath());
+                material = new Material(mtrlFile);
+            }
+            catch (Exception e)
+            {
+                _log.Error(e, $"Failed to load material {child.FullPath}");
+                return;
+            }
+
+            // unfortunately processing multiple materials at once can corrupt game memory >:(
+            await _semaphoreSlim.WaitAsync(cancellationToken);
+            try
+            {
+                var glTFMaterial = await ComposeTextures(mtrlFile, material, exportPath, child?.Children, cancellationToken);
+                       
+                if (glTFMaterial == null)
                 {
                     return;
                 }
 
-                Material? material = null;
-                MtrlFile? mtrlFile = null;
-                try
-                {
-                    mtrlFile = Path.IsPathRooted(child.FullPath.ToPath())
-                       ? LuminaManager.GameData.GetFileFromDisk<MtrlFile>(child.FullPath.ToPath(), child.GamePath.ToString())
-                       : LuminaManager.GameData.GetFile<MtrlFile>(child.FullPath.ToPath());
-                    material = new Material(mtrlFile);
-                }
-                catch (Exception e)
-                {
-                    _log.Error(e, $"Failed to load material {child.FullPath}");
-                    return;
-                }
-
-                var glTFMaterial = new MaterialBuilder
-                {
-                    Name = child.FullPath.ToPath(),
-                };
-
-                try
-                {
-                    ComposeTextures(glTFMaterial, mtrlFile, material, exportPath, child?.Children);
-                    materials.Add((child.FullPath.ToPath(), child.GamePath.ToString(), glTFMaterial));
-                }
-                catch (Exception e)
-                {
-                    _log.Error(e, $"Failed to compose textures for material {child.FullPath.ToPath()}");
-                    return;
-                }
-            }));
+                materials.Add((child.FullPath.ToPath(), child.GamePath.ToString(), glTFMaterial));
+            }
+            catch (Exception e)
+            {
+                _log.Error(e, $"Failed to compose textures for material {child.FullPath.ToPath()}");
+                return;
+            }
+            finally
+            {
+                _semaphoreSlim.Release();
+            }
         }
-
-        await Task.WhenAll(textureTasks);
 
         foreach (var mesh in meshes)
         {
@@ -320,7 +327,7 @@ public class ModelExporter
                     _log.Warning($"Using material {material.gamepath} for {mesh.Material.ResolvedPath}");
                 }
 
-                HandleMeshCreation(material.material, raceDeformer, glTFScene, mesh, model, raceCode, deform, boneMap, name, joints);
+                await HandleMeshCreation(material.material, raceDeformer, glTFScene, mesh, model, raceCode, deform, boneMap, name, joints);
             }
             catch (Exception e)
             {
@@ -330,7 +337,7 @@ public class ModelExporter
         }
     }
 
-    private void HandleMeshCreation(MaterialBuilder glTFMaterial,
+    private Task HandleMeshCreation(MaterialBuilder glTFMaterial,
     RaceDeformer raceDeformer,
     SceneBuilder glTFScene,
     Mesh xivMesh,
@@ -395,6 +402,8 @@ public class ModelExporter
             meshBuilder.BuildShapes(xivModel.Shapes.Values.ToArray(), mesh, 0, xivMesh.Indices.Length);
             if (useSkinning) { glTFScene.AddSkinnedMesh(mesh, Matrix4x4.Identity, joints); } else { glTFScene.AddRigidMesh(mesh, Matrix4x4.Identity); }
         }
+
+        return Task.CompletedTask;
     }
 
     private bool TryGetModel(ResourceNode node, ushort? deform, out string path, out Model? model)
@@ -478,22 +487,6 @@ public class ModelExporter
 
                 // to fix transparency issues 
                 // normal.SetPixel(x, y, Color.FromArgb(255, normalPixel.R, normalPixel.G, 255));
-
-                // Normal:
-                // Red: Standard tangent space normal map
-                // Green: Standard tangent space normal map
-                // Blue: opacity 0-128, 128+ is full opacity
-                // Alpha: Colorset row
-
-                // Multi:
-                // Red: Ambient occlusion
-                // Green: specular intensity
-                // Blue: Gloss?
-
-                // Vertex Color/Alpha UV3
-                // Red: Base Color Multiplier
-                // Green: Specular Multiplier
-                // Blue: Gloss Multiplier
                 normal.SetPixel(x, y, Color.FromArgb(normalPixel.B, normalPixel.R, normalPixel.G, 255));
 
                 var diffuseBlendColour = ColorUtility.BlendColorSet(in colorSetInfo, colorSetIndex1, colorSetIndex2, normalPixel.B, colorSetBlend, ColorUtility.TextureType.Diffuse);
@@ -507,9 +500,7 @@ public class ModelExporter
             }
         }
 
-        // After calculating the value, save it in cache before returning it
-        var result = (diffuse, specular, emission);
-        return result;
+        return (diffuse, specular, emission);
     }
 
     private (Bitmap, Bitmap) CalculateSpecularOcclusion(Bitmap mask, Bitmap specularMap)
@@ -567,25 +558,30 @@ public class ModelExporter
         if (penumbraMtrl.HasTable && penumbraMtrl.HasDyeTable)
         {
             _log.Debug($"MtrlFile has dye table: {mtrl.FilePath.Path}");
-            // need to apply dye table to colorset info and then fuck with the diffuse?
-
+            // do something with dye table on the texture
 
         }
         else if (penumbraMtrl.HasTable)
         {
             _log.Debug($"MtrlFile has table: {mtrl.FilePath.Path}");
-            // probably can ignore?
+            // set default colorset
         }
     }
 
     // Compose the textures for the glTF material using the xivMaterial information
-
-    private void ComposeTextures(MaterialBuilder glTFMaterial, MtrlFile mtrlFile, Material xivMaterial, string outputDir, IEnumerable<ResourceNode>? nodes)
+    private static SemaphoreSlim _semaphoreSlim = new SemaphoreSlim(1);
+    private async Task<MaterialBuilder?> ComposeTextures(MtrlFile mtrlFile, Material xivMaterial, string outputDir, IEnumerable<ResourceNode>? nodes, CancellationToken cancellationToken)
     {
         var xivTextureMap = new Dictionary<TextureUsage, Bitmap>();
 
         foreach (var xivTexture in xivMaterial.Textures)
         {
+            // Check for cancellation request
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return null;
+            }
+
             if (xivTexture.TexturePath == "dummy.tex") { continue; }
 
             var texturePath = xivTexture.TexturePath;
@@ -610,99 +606,144 @@ public class ModelExporter
                 }
             }
 
+            // check outputdir if texture already exists
+            var textureFileName = GetTextureFileName(xivTexture.TextureUsageRaw);
+            var texturePath2 = Path.Combine(outputDir, $"{mtrlFile.FilePath.Path.Replace("\\", "/").Split("/").Last()}_{textureFileName}.png");
+
+
             var textureBuffer = GetTextureBuffer(texturePath, xivTexture.TexturePath);
 
             xivTextureMap.Add(xivTexture.TextureUsageRaw, textureBuffer);
         }
 
-        //_log.Debug($"Composing textures for {glTFMaterial.Name} -> {xivMaterial.ShaderPack}");
-
         // reference for this fuckery
         // https://docs.google.com/spreadsheets/u/0/d/1kIKvVsW3fOnVeTi9iZlBDqJo6GWVn6K6BCUIRldEjhw/htmlview#
 
-        // TODO: Colorset fuckery for gear & dyes, hair, lips, eyes, etc.
-        //ColorsetShit(mtrlFile);
-        if (xivMaterial.ShaderPack == "character.shpk")
+        // genuinely not sure when to set to blend, but I think its needed for opacity on some stuff
+        SharpGLTF.Materials.AlphaMode alphaMode = SharpGLTF.Materials.AlphaMode.MASK;
+        switch (xivMaterial.ShaderPack)
         {
-            // for character gear, split the normal map into diffuse, specular and emission
-            if (xivTextureMap.TryGetValue(TextureUsage.SamplerNormal, out var normal))
-            {
-                var (diffuse, specular, emission) = CalculateCharacterShaderPack(xivMaterial, normal);
-
-                // Add the shader pack textures to xivTextureMap
-                // Use TryAdd to avoid overwriting existing textures (if any)
-                xivTextureMap.TryAdd(TextureUsage.SamplerDiffuse, diffuse);
-                xivTextureMap.TryAdd(TextureUsage.SamplerSpecular, specular);
-                xivTextureMap.TryAdd(TextureUsage.SamplerReflection, emission);
-            }
-
-            if (xivTextureMap.TryGetValue(TextureUsage.SamplerMask, out var mask) && xivTextureMap.TryGetValue(TextureUsage.SamplerSpecular, out var specularMap))
-            {
-                var (specular, occlusion) = CalculateSpecularOcclusion(mask, specularMap);
-
-                // Add the specular occlusion texture to xivTextureMap
-                xivTextureMap.Add(TextureUsage.SamplerWaveMap, occlusion);
-            }
-        }
-
-        if (xivMaterial.ShaderPack == "skin.shpk")
-        {
-            if (xivTextureMap.TryGetValue(TextureUsage.SamplerNormal, out var normal))
-            {
-                // use blue for opacity
-                for (var x = 0; x < normal.Width; x++)
+            case "character.shpk":
                 {
-                    for (var y = 0; y < normal.Height; y++)
+                    alphaMode = SharpGLTF.Materials.AlphaMode.MASK;
+                    // for character gear, split the normal map into diffuse, specular and emission
+                    if (xivTextureMap.TryGetValue(TextureUsage.SamplerNormal, out var normal))
                     {
-                        var normalPixel = normal.GetPixel(x, y);
-                        normal.SetPixel(x, y, Color.FromArgb(normalPixel.B, normalPixel.R, normalPixel.G, 255));
+                        var (diffuse, specular, emission) = CalculateCharacterShaderPack(xivMaterial, normal);
+                        // Add the shader pack textures to xivTextureMap
+                        // Use TryAdd to avoid overwriting existing textures (if any)
+                        xivTextureMap.TryAdd(TextureUsage.SamplerDiffuse, diffuse);
+                        xivTextureMap.TryAdd(TextureUsage.SamplerSpecular, specular);
+                        xivTextureMap.TryAdd(TextureUsage.SamplerReflection, emission);
                     }
+
+                    if (xivTextureMap.TryGetValue(TextureUsage.SamplerMask, out var mask) && xivTextureMap.TryGetValue(TextureUsage.SamplerSpecular, out var specularMap))
+                    {
+                        var (specular, occlusion) = CalculateSpecularOcclusion(mask, specularMap);
+
+                        // Add the specular occlusion texture to xivTextureMap
+                        xivTextureMap.Add(TextureUsage.SamplerWaveMap, occlusion);
+                    }
+                    break;
                 }
-            }
+            case "skin.shpk":
+                {
+                    alphaMode = SharpGLTF.Materials.AlphaMode.MASK;
+                    // skin should use normalmap as alphachannel for Principled BSDF
+                    // currently AlphaMode.Mask means we pull it from vertexvolor
+
+                    if (xivTextureMap.TryGetValue(TextureUsage.SamplerNormal, out var normal))
+                    {
+                        // use blue for opacity
+                        for (var x = 0; x < normal.Width; x++)
+                        {
+                            for (var y = 0; y < normal.Height; y++)
+                            {
+                                var normalPixel = normal.GetPixel(x, y);
+                                normal.SetPixel(x, y, Color.FromArgb(normalPixel.B, normalPixel.R, normalPixel.G, 255));
+                            }
+                        }
+                    }
+                    break;
+                }
+            case "hair.shpk":
+                {
+                    alphaMode = SharpGLTF.Materials.AlphaMode.MASK;
+                    break;
+                }
+            case "iris.shpk":
+                {
+                    alphaMode = SharpGLTF.Materials.AlphaMode.MASK;
+                    break;
+                }
+            default:
+                _log.Debug($"Unhandled shader pack {xivMaterial.ShaderPack}");
+                break;
         }
 
+        _log.Debug($"Shader pack: {mtrlFile.FilePath.Path}\n{string.Join("\n", xivTextureMap.Select(x => x.Key.ToString()))}");
+
+        var glTFMaterial = new MaterialBuilder
+        {
+            Name = mtrlFile.FilePath.Path,
+            AlphaMode = alphaMode,
+            DoubleSided = true
+        };
+
+        ExportTextures(glTFMaterial, xivTextureMap, outputDir);
+
+        return glTFMaterial;
+    }
+
+    private void ExportTexture(MaterialBuilder glTFMaterial, TextureUsage textureUsage, Bitmap bitmap, string outputDir)
+    {
+        var name = glTFMaterial.Name.Replace("\\", "/").Split("/").Last().Split(".").First();
+        string texturePath = $"{name}_{GetTextureFileName(textureUsage)}.png";
+        var path = Path.Combine(outputDir, texturePath);
+
+        // Save the texture to the output directory and update the glTF material with respective image paths
+        switch (textureUsage)
+        {
+            case TextureUsage.SamplerColorMap0:
+            case TextureUsage.SamplerDiffuse:
+                bitmap.Save(path);
+                glTFMaterial.WithBaseColor(path);
+                break;
+            case TextureUsage.SamplerNormalMap0:
+            case TextureUsage.SamplerNormal:
+                bitmap.Save(path);
+                glTFMaterial.WithNormal(path, 1);
+                break;
+            case TextureUsage.SamplerSpecularMap0:
+            case TextureUsage.SamplerSpecular:
+                bitmap.Save(path);
+                glTFMaterial.WithSpecularColor(path);
+                break;
+            case TextureUsage.SamplerWaveMap:
+                bitmap.Save(path);
+                glTFMaterial.WithOcclusion(path);
+                break;
+            case TextureUsage.SamplerReflection:
+                bitmap.Save(path);
+                glTFMaterial.WithEmissive(path, new Vector3(255, 255, 255));
+                break;
+            case TextureUsage.SamplerMask:
+                // Do something with this texture
+                bitmap.Save(path);
+                break;
+            default:
+                _log.Warning("Unhandled TextureUsage: " + textureUsage);
+                bitmap.Save(path);
+                break;
+        }
+    }
+
+    private void ExportTextures(MaterialBuilder glTFMaterial, Dictionary<TextureUsage, Bitmap> xivTextureMap, string outputDir)
+    {
         var num = 0;
         foreach (var xivTexture in xivTextureMap)
         {
-            var textureName = Guid.NewGuid().ToString();
-            string texturePath = textureName + " " + GetTextureFileName(xivTexture.Key) + $"_{num}.png";
-
-            // Save the texture to the output directory and update the glTF material with respective image paths
-            switch (xivTexture.Key)
-            {
-                case TextureUsage.SamplerColorMap0:
-                case TextureUsage.SamplerDiffuse:
-                    xivTexture.Value.Save(Path.Combine(outputDir, texturePath));
-                    glTFMaterial.WithChannelImage(KnownChannel.BaseColor, Path.Combine(outputDir, texturePath));
-                    break;
-                case TextureUsage.SamplerNormalMap0:
-                case TextureUsage.SamplerNormal:
-                    xivTexture.Value.Save(Path.Combine(outputDir, texturePath));
-                    glTFMaterial.WithChannelImage(KnownChannel.Normal, Path.Combine(outputDir, texturePath));
-                    break;
-                case TextureUsage.SamplerSpecularMap0:
-                case TextureUsage.SamplerSpecular:
-                    xivTexture.Value.Save(Path.Combine(outputDir, texturePath));
-                    glTFMaterial.WithSpecularColor(Path.Combine(outputDir, texturePath));
-                    break;
-                case TextureUsage.SamplerWaveMap:
-                    xivTexture.Value.Save(Path.Combine(outputDir, texturePath));
-                    glTFMaterial.WithChannelImage(KnownChannel.Occlusion, Path.Combine(outputDir, texturePath));
-                    break;
-                case TextureUsage.SamplerReflection:
-                    xivTexture.Value.Save(Path.Combine(outputDir, texturePath));
-                    glTFMaterial.WithChannelImage(KnownChannel.Emissive, Path.Combine(outputDir, texturePath));
-                    glTFMaterial.WithEmissive(Path.Combine(outputDir, texturePath), new Vector3(255, 255, 255));
-                    break;
-                case TextureUsage.SamplerMask:
-                    // Do something with this texture
-                    xivTexture.Value.Save(Path.Combine(outputDir, texturePath));
-                    break;
-                default:
-                    _log.Warning("Unhandled TextureUsage: " + xivTexture.Key);
-                    break;
-            }
-
+            ExportTexture(glTFMaterial, xivTexture.Key, xivTexture.Value, outputDir);
             num++;
         }
 
@@ -742,7 +783,7 @@ public class ModelExporter
             case TextureUsage.SamplerWaveletMap1:
             case TextureUsage.SamplerWhitecapMap:
             default:
-                return null;
+                return textureUsage.ToString();
         }
     }
 }
