@@ -200,13 +200,13 @@ public class ModelExporter
         return d[n, m];
     }
 
-    private Task HandleModel(ResourceNode node, RaceDeformer raceDeformer, ushort? deform, string exportPath, Dictionary<string, NodeBuilder> boneMap, NodeBuilder[] joints, SceneBuilder glTFScene)
+    private async Task HandleModel(ResourceNode node, RaceDeformer raceDeformer, ushort? deform, string exportPath, Dictionary<string, NodeBuilder> boneMap, NodeBuilder[] joints, SceneBuilder glTFScene)
     {
         var path = node.FullPath.ToPath();
         var file = LuminaManager.GetFile<FileResource>(path);
         if (!TryGetModel(node, deform, out var modelPath, out var model))
         {
-            return Task.CompletedTask;
+            return;
         }
 
         if (string.Equals(path, modelPath, StringComparison.InvariantCultureIgnoreCase))
@@ -225,24 +225,30 @@ public class ModelExporter
         var meshes = model.Meshes.Where(x => x.Types.Contains(Mesh.MeshType.Main)).ToArray();
         var nodeChildren = node.Children.ToList();
 
+        var textureTasks = new List<Task>();
         var materials = new List<(string fullpath, string gamepath, MaterialBuilder material)>();
         foreach (var child in nodeChildren)
         {
-            if (child.Type == Api.Enums.ResourceType.Mtrl)
+            textureTasks.Add(Task.Run(() =>
             {
+                if (child.Type != Api.Enums.ResourceType.Mtrl)
+                {
+                    return;
+                }
+
                 Material? material = null;
                 MtrlFile? mtrlFile = null;
                 try
                 {
-                     mtrlFile = Path.IsPathRooted(child.FullPath.ToPath())
-                        ? LuminaManager.GameData.GetFileFromDisk<MtrlFile>(child.FullPath.ToPath(), child.GamePath.ToString())
-                        : LuminaManager.GameData.GetFile<MtrlFile>(child.FullPath.ToPath());
+                    mtrlFile = Path.IsPathRooted(child.FullPath.ToPath())
+                       ? LuminaManager.GameData.GetFileFromDisk<MtrlFile>(child.FullPath.ToPath(), child.GamePath.ToString())
+                       : LuminaManager.GameData.GetFile<MtrlFile>(child.FullPath.ToPath());
                     material = new Material(mtrlFile);
                 }
                 catch (Exception e)
                 {
                     _log.Error(e, $"Failed to load material {child.FullPath}");
-                    continue;
+                    return;
                 }
 
                 var glTFMaterial = new MaterialBuilder
@@ -258,10 +264,12 @@ public class ModelExporter
                 catch (Exception e)
                 {
                     _log.Error(e, $"Failed to compose textures for material {child.FullPath.ToPath()}");
-                    continue;
+                    return;
                 }
-            }
+            }));
         }
+
+        await Task.WhenAll(textureTasks);
 
         foreach (var mesh in meshes)
         {
@@ -320,72 +328,6 @@ public class ModelExporter
                 continue;
             }            
         }
-
-        /*
-        foreach (var mesh in meshes)
-        {
-            // updates the short-path to full in-game mesh path
-            mesh.Material.Update(LuminaManager.GameData);
-
-            // find child where GamePath == mesh.Material.ResolvedPath
-
-            var child = nodeChildren.FirstOrDefault(x => x.GamePath.ToString() == mesh.Material.ResolvedPath);
-            if (child == null)
-            {
-                if (deform == null)
-                {
-                    _log.Warning($"Could not find child for {mesh.Material.ResolvedPath}");
-                }
-                else
-                {
-                    var newPath = Regex.Replace(mesh.Material.ResolvedPath, @"c\d+", $"c{deform}");
-                    child = nodeChildren.FirstOrDefault(x => x.GamePath.ToString() == newPath);
-                }
-            }
-
-            var childPath = child?.FullPath.ToPath() ?? mesh.Material.ResolvedPath;
-            var gamePath = child?.GamePath.ToString() ?? mesh.Material.ResolvedPath;
-            var actualPath = LuminaManager.FileResolver?.Invoke(childPath) ?? childPath;
-
-            try
-            {
-
-                // need game path also
-                var mtrlFile = Path.IsPathRooted(actualPath)
-                    ? LuminaManager.GameData.GetFileFromDisk<MtrlFile>(actualPath, gamePath)
-                    : LuminaManager.GameData.GetFile<MtrlFile>(actualPath);
-                var xivMaterial = new Material(mtrlFile);
-                var glTFMaterial = new MaterialBuilder
-                {
-                    Name = childPath,
-                };
-
-                try
-                {
-                    ComposeTextures(glTFMaterial, mtrlFile, xivMaterial, exportPath, child?.Children);
-                    HandleMeshCreation(glTFMaterial, raceDeformer, glTFScene, mesh, model, raceCode, deform, boneMap, name, joints);
-                }
-                catch
-                {
-                    _log.Debug($"Failed to load material {childPath}, attempting fallback {gamePath}");
-                    // fallback and use the default material
-                    glTFMaterial = new MaterialBuilder
-                    {
-                        Name = gamePath,
-                    };
-
-                    ComposeTextures(glTFMaterial, mtrlFile, xivMaterial, exportPath, child?.Children);
-                    HandleMeshCreation(glTFMaterial, raceDeformer, glTFScene, mesh, model, raceCode, deform, boneMap, name, joints);
-                }
-            }
-            catch (Exception e)
-            {
-                _log.Error(e, $"Failed to load material {childPath}");
-                continue;
-            }
-        }*/
-
-        return Task.CompletedTask;
     }
 
     private void HandleMeshCreation(MaterialBuilder glTFMaterial,
@@ -637,6 +579,7 @@ public class ModelExporter
     }
 
     // Compose the textures for the glTF material using the xivMaterial information
+
     private void ComposeTextures(MaterialBuilder glTFMaterial, MtrlFile mtrlFile, Material xivMaterial, string outputDir, IEnumerable<ResourceNode>? nodes)
     {
         var xivTextureMap = new Dictionary<TextureUsage, Bitmap>();
@@ -721,7 +664,8 @@ public class ModelExporter
         var num = 0;
         foreach (var xivTexture in xivTextureMap)
         {
-            string texturePath = GetTextureFileName(xivTexture.Key) + $"_{num}.png";
+            var textureName = Guid.NewGuid().ToString();
+            string texturePath = textureName + " " + GetTextureFileName(xivTexture.Key) + $"_{num}.png";
 
             // Save the texture to the output directory and update the glTF material with respective image paths
             switch (xivTexture.Key)
