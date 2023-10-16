@@ -152,6 +152,54 @@ public class ModelExporter
         }
     }
 
+    /// <summary>
+    /// Compute the distance between two strings.
+    /// </summary>
+    public static int ComputeLD(string s, string t)
+    {
+        int n = s.Length;
+        int m = t.Length;
+        int[,] d = new int[n + 1, m + 1];
+
+        // Step 1
+        if (n == 0)
+        {
+            return m;
+        }
+
+        if (m == 0)
+        {
+            return n;
+        }
+
+        // Step 2
+        for (int i = 0; i <= n; d[i, 0] = i++)
+        {
+        }
+
+        for (int j = 0; j <= m; d[0, j] = j++)
+        {
+        }
+
+        // Step 3
+        for (int i = 1; i <= n; i++)
+        {
+            //Step 4
+            for (int j = 1; j <= m; j++)
+            {
+                // Step 5
+                int cost = (t[j - 1] == s[i - 1]) ? 0 : 1;
+
+                // Step 6
+                d[i, j] = Math.Min(
+                    Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1),
+                    d[i - 1, j - 1] + cost);
+            }
+        }
+        // Step 7
+        return d[n, m];
+    }
+
     private Task HandleModel(ResourceNode node, RaceDeformer raceDeformer, ushort? deform, string exportPath, Dictionary<string, NodeBuilder> boneMap, NodeBuilder[] joints, SceneBuilder glTFScene)
     {
         var path = node.FullPath.ToPath();
@@ -177,6 +225,103 @@ public class ModelExporter
         var meshes = model.Meshes.Where(x => x.Types.Contains(Mesh.MeshType.Main)).ToArray();
         var nodeChildren = node.Children.ToList();
 
+        var materials = new List<(string fullpath, string gamepath, MaterialBuilder material)>();
+        foreach (var child in nodeChildren)
+        {
+            if (child.Type == Api.Enums.ResourceType.Mtrl)
+            {
+                Material? material = null;
+                MtrlFile? mtrlFile = null;
+                try
+                {
+                     mtrlFile = Path.IsPathRooted(child.FullPath.ToPath())
+                        ? LuminaManager.GameData.GetFileFromDisk<MtrlFile>(child.FullPath.ToPath(), child.GamePath.ToString())
+                        : LuminaManager.GameData.GetFile<MtrlFile>(child.FullPath.ToPath());
+                    material = new Material(mtrlFile);
+                }
+                catch (Exception e)
+                {
+                    _log.Error(e, $"Failed to load material {child.FullPath}");
+                    continue;
+                }
+
+                var glTFMaterial = new MaterialBuilder
+                {
+                    Name = child.FullPath.ToPath(),
+                };
+
+                try
+                {
+                    ComposeTextures(glTFMaterial, mtrlFile, material, exportPath, child?.Children);
+                    materials.Add((child.FullPath.ToPath(), child.GamePath.ToString(), glTFMaterial));
+                }
+                catch (Exception e)
+                {
+                    _log.Error(e, $"Failed to compose textures for material {child.FullPath.ToPath()}");
+                    continue;
+                }
+            }
+        }
+
+        foreach (var mesh in meshes)
+        {
+            mesh.Material.Update(LuminaManager.GameData);
+        }
+
+        _log.Debug($"Handling model {name} with {meshes.Length} meshes\n{string.Join("\n", meshes.Select(x => x.Material.ResolvedPath))}\nUsing materials\n{string.Join("\n", materials.Select(x =>
+        {
+            if (x.fullpath == x.gamepath)
+            {
+                return x.fullpath;
+            }
+
+            return $"{x.gamepath} -> {x.fullpath}";
+        }))}");
+
+        foreach (var mesh in meshes)
+        { 
+            // try get material from materials
+            var material = materials.FirstOrDefault(x => x.fullpath == mesh.Material.ResolvedPath || x.gamepath == mesh.Material.ResolvedPath);
+
+            if (material == default)
+            {
+                // match most similar material from list
+                var match = materials.Select(x => (x.fullpath, x.gamepath, ComputeLD(x.fullpath, mesh.Material.ResolvedPath))).OrderBy(x => x.Item3).FirstOrDefault();
+                var match2 = materials.Select(x => (x.fullpath, x.gamepath, ComputeLD(x.gamepath, mesh.Material.ResolvedPath))).OrderBy(x => x.Item3).FirstOrDefault();
+
+                if (match.Item3 < match2.Item3)
+                {
+                    material = materials.FirstOrDefault(x => x.fullpath == match.fullpath || x.gamepath == match.gamepath);
+                }
+                else
+                {
+                    material = materials.FirstOrDefault(x => x.fullpath == match2.fullpath || x.gamepath == match2.gamepath);
+                }
+            }
+
+            if (material == default)
+            {
+                _log.Warning($"Could not find material for {mesh.Material.ResolvedPath}");
+                continue;
+            }
+
+            try
+            {
+                if (mesh.Material.ResolvedPath != material.gamepath)
+                {
+                    _log.Warning($"Using material {material.gamepath} for {mesh.Material.ResolvedPath}");
+                }
+
+                HandleMeshCreation(material.material, raceDeformer, glTFScene, mesh, model, raceCode, deform, boneMap, name, joints);
+            }
+            catch (Exception e)
+            {
+                _log.Error(e, $"Failed to handle mesh creation for {mesh.Material.ResolvedPath}");
+                continue;
+            }            
+        }
+
+        /*
         foreach (var mesh in meshes)
         {
             // updates the short-path to full in-game mesh path
@@ -238,7 +383,7 @@ public class ModelExporter
                 _log.Error(e, $"Failed to load material {childPath}");
                 continue;
             }
-        }
+        }*/
 
         return Task.CompletedTask;
     }
@@ -313,7 +458,7 @@ public class ModelExporter
     private bool TryGetModel(ResourceNode node, ushort? deform, out string path, out Model? model)
     {
         path = node.FullPath.ToPath();
-        if (TryLoadModel(node.FullPath.ToString(), out model))
+        if (TryLoadModel(node.FullPath.ToPath(), out model))
         {
             return true;
         }
@@ -342,8 +487,9 @@ public class ModelExporter
             model = LuminaManager.GetModel(path);
             return true;
         }
-        catch
+        catch (Exception e)
         {
+            _log.Warning(e, $"Failed to load model {path}");
             return false;
         }
     }
@@ -526,13 +672,13 @@ public class ModelExporter
             xivTextureMap.Add(xivTexture.TextureUsageRaw, textureBuffer);
         }
 
-        _log.Debug($"Composing textures for {glTFMaterial.Name} -> {xivMaterial.ShaderPack}");
+        //_log.Debug($"Composing textures for {glTFMaterial.Name} -> {xivMaterial.ShaderPack}");
 
         // reference for this fuckery
         // https://docs.google.com/spreadsheets/u/0/d/1kIKvVsW3fOnVeTi9iZlBDqJo6GWVn6K6BCUIRldEjhw/htmlview#
 
         // TODO: Colorset fuckery for gear & dyes, hair, lips, eyes, etc.
-        ColorsetShit(mtrlFile);
+        //ColorsetShit(mtrlFile);
         if (xivMaterial.ShaderPack == "character.shpk")
         {
             // for character gear, split the normal map into diffuse, specular and emission
