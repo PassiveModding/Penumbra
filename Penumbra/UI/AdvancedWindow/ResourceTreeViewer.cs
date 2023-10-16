@@ -149,7 +149,7 @@ public class ResourceTreeViewer
                 foreach (var node in skeletonNodes)
                 {
                     // cannot use fullpath because things like ivcs are fucky and crash the game
-                    var path = node.GamePath.ToString();
+                    var path = node.FullPath.ToPath();
                     try
                     {
                         var file = _modelExporter.LuminaManager.GetFile<FileResource>(path);
@@ -158,11 +158,27 @@ public class ResourceTreeViewer
                         var xml = _modelExporter.Converter.HkxToXml(sklb.HkxData);
                         skeletons.Add(new HavokXml(xml));
                         _log.Debug($"Loaded skeleton {path}");
+                        continue;
                     }
                     catch (Exception ex)
                     {
-                        _log.Error(ex, $"Failed loading skeleton {path}");
-                        throw;
+                        _log.Error(ex, $"Failed to load {path}, falling back to GamePath");
+                    }
+
+                    path = node.GamePath.ToString();
+                    try
+                    {
+                        var file = _modelExporter.LuminaManager.GetFile<FileResource>(path);
+                        var sklb = SklbFile.FromStream(file.Reader.BaseStream);
+
+                        var xml = _modelExporter.Converter.HkxToXml(sklb.HkxData);
+                        skeletons.Add(new HavokXml(xml));
+                        _log.Debug($"Loaded skeleton {path}");
+                        continue;
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Error(ex, $"Failed to load {path}");
                     }
                 }
             }
