@@ -9,10 +9,8 @@ using System.Text.Json;
 using Penumbra.Services;
 using Dalamud.Plugin.Services;
 using Lumina.Data;
-using System;
 using Xande.Files;
 using Xande.Havok;
-using Xande;
 
 namespace Penumbra.UI.AdvancedWindow;
 
@@ -149,36 +147,39 @@ public class ResourceTreeViewer
                 foreach (var node in skeletonNodes)
                 {
                     // cannot use fullpath because things like ivcs are fucky and crash the game
-                    var path = node.FullPath.ToPath();
+                    var nodePath = node.FullPath.ToPath();
                     try
                     {
-                        var file = _modelExporter.LuminaManager.GetFile<FileResource>(path);
+                        var file = _modelExporter.LuminaManager.GetFile<FileResource>(nodePath);
                         var sklb = SklbFile.FromStream(file.Reader.BaseStream);
 
                         var xml = _modelExporter.Converter.HkxToXml(sklb.HkxData);
+                        // write xml file without extension
+                        File.WriteAllText(Path.Combine(path, Path.GetFileNameWithoutExtension(nodePath) + ".xml"), xml);
+
                         skeletons.Add(new HavokXml(xml));
-                        _log.Debug($"Loaded skeleton {path}");
+                        _log.Debug($"Loaded skeleton {nodePath}");
                         continue;
                     }
                     catch (Exception ex)
                     {
-                        _log.Error(ex, $"Failed to load {path}, falling back to GamePath");
+                        _log.Error(ex, $"Failed to load {nodePath}, falling back to GamePath");
                     }
 
-                    path = node.GamePath.ToString();
+                    nodePath = node.GamePath.ToString();
                     try
                     {
-                        var file = _modelExporter.LuminaManager.GetFile<FileResource>(path);
+                        var file = _modelExporter.LuminaManager.GetFile<FileResource>(nodePath);
                         var sklb = SklbFile.FromStream(file.Reader.BaseStream);
 
                         var xml = _modelExporter.Converter.HkxToXml(sklb.HkxData);
                         skeletons.Add(new HavokXml(xml));
-                        _log.Debug($"Loaded skeleton {path}");
+                        _log.Debug($"Loaded skeleton {nodePath}");
                         continue;
                     }
                     catch (Exception ex)
                     {
-                        _log.Error(ex, $"Failed to load {path}");
+                        _log.Error(ex, $"Failed to load {nodePath}");
                     }
                 }
             }
