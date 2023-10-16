@@ -20,6 +20,10 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Penumbra.String", "Penumbra
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Xande", "Xande\Xande\Xande.csproj", "{B4D09280-DCEA-4B6E-A72C-C8FF341A263C}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Lumina", "Lumina\src\Lumina\Lumina.csproj", "{1D74366A-4C2F-4F28-8677-203155817CD4}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Lumina.Excel", "Lumina.Excel\src\Lumina.Excel\Lumina.Excel.csproj", "{29220962-9453-409B-9443-0E0B2E12B825}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -50,6 +54,14 @@ Global
 		{B4D09280-DCEA-4B6E-A72C-C8FF341A263C}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{B4D09280-DCEA-4B6E-A72C-C8FF341A263C}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{B4D09280-DCEA-4B6E-A72C-C8FF341A263C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1D74366A-4C2F-4F28-8677-203155817CD4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1D74366A-4C2F-4F28-8677-203155817CD4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1D74366A-4C2F-4F28-8677-203155817CD4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1D74366A-4C2F-4F28-8677-203155817CD4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{29220962-9453-409B-9443-0E0B2E12B825}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{29220962-9453-409B-9443-0E0B2E12B825}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{29220962-9453-409B-9443-0E0B2E12B825}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{29220962-9453-409B-9443-0E0B2E12B825}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

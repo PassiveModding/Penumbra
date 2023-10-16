@@ -17,3 +17,9 @@
 [submodule "Xande"]
 	path = Xande
 	url = https://github.com/xivdev/Xande.git
+[submodule "Lumina"]
+	path = Lumina
+	url = https://github.com/NotAdam/Lumina.git
+[submodule "Lumina.Excel"]
+	path = Lumina.Excel
+	url = https://github.com/NotAdam/Lumina.Excel.git
