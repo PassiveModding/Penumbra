@@ -10,10 +10,10 @@ public class OnScreenTab : ITab
     private readonly Configuration      _config;
     private          ResourceTreeViewer _viewer;
 
-    public OnScreenTab(Configuration config, ResourceTreeFactory treeFactory, ChangedItemDrawer changedItemDrawer, DalamudServices dalamud)
+    public OnScreenTab(Configuration config, ResourceTreeFactory treeFactory, ChangedItemDrawer changedItemDrawer, DalamudServices dalamud, StainService stainService)
     {
         _config = config;
-        _viewer = new ResourceTreeViewer(_config, treeFactory, changedItemDrawer, 0, delegate { }, delegate { }, dalamud);
+        _viewer = new ResourceTreeViewer(_config, treeFactory, changedItemDrawer, 0, delegate { }, delegate { }, dalamud, stainService);
     }
 
     public ReadOnlySpan<byte> Label

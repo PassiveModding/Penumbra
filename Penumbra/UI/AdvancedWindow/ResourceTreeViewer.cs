@@ -11,6 +11,7 @@ using Dalamud.Plugin.Services;
 using Lumina.Data;
 using Xande.Files;
 using Xande.Havok;
+using Penumbra.Services.Xande;
 
 namespace Penumbra.UI.AdvancedWindow;
 
@@ -32,9 +33,13 @@ public class ResourceTreeViewer
     private readonly ModelExporter _modelExporter;
     private readonly IPluginLog _log;
     private Task<ResourceTree[]>? _task;
+    private Dictionary<nint, bool[]> _enabledExports = new();
+
+    private CancellationTokenSource _exportCts = new();
+    private Task? _exportTask;
 
     public ResourceTreeViewer(Configuration config, ResourceTreeFactory treeFactory, ChangedItemDrawer changedItemDrawer,
-        int actionCapacity, Action onRefresh, Action<ResourceNode, Vector2> drawActions, DalamudServices dalamud)
+        int actionCapacity, Action onRefresh, Action<ResourceNode, Vector2> drawActions, DalamudServices dalamud, StainService stainService)
     {
         _config = config;
         _treeFactory = treeFactory;
@@ -43,13 +48,11 @@ public class ResourceTreeViewer
         _onRefresh = onRefresh;
         _drawActions = drawActions;
         _dalamud = dalamud;
-        _modelExporter = new ModelExporter(dalamud);
+        _modelExporter = new ModelExporter(dalamud, stainService);
         _log = dalamud.Log;
         _unfolded = new HashSet<nint>();
         _log.Debug("Initialized ResourceTreeViewer");
     }
-
-    private static bool IsExporting;
 
     public void Draw()
     {
@@ -99,33 +102,35 @@ public class ResourceTreeViewer
                 ImGui.TextUnformatted($"Collection: {tree.CollectionName}");
 
                 // export character button 
-                if (IsExporting)
+                // if task is null, then we can export
+                // if task exists, show cancel button
+                // on cancel, wait till task returns, then show export again
+                if (_exportTask == null)
                 {
-                    ImGui.TextUnformatted("Exporting character");
-                    if (ImGui.Button("Cancel Export"))
+                    if (ImGui.Button("Export Model"))
                     {
-                        if (Cts != null)
-                        {
-                            Cts.Cancel();
-                            Cts = null;
-                            _log.Debug("Cancelled export");
-                        }
+                        _exportTask = _modelExporter.ExportResourceTree(tree, _enabledExports[unchecked(tree.DrawObjectAddress * 31)], _exportCts.Token);
                     }
                 }
                 else
                 {
-                    if (ImGui.Button("Export Character"))
+                    // show cancelling... if cancelled but not completed.
+                    // if completed then show export again
+                    if (_exportTask.IsCompleted)
                     {
-                        try
+                        _exportTask = null;
+                    }
+                    else if (_exportTask.IsCanceled)
+                    {
+                        ImGui.TextUnformatted("Export Cancelled...");
+                    }
+                    else
+                    {
+                        if (ImGui.Button("Cancel Export"))
                         {
-                            IsExporting = true;
-                            Cts = new CancellationTokenSource();
-                            RunModelExport(tree);
-                        }
-                        catch (Exception e)
-                        {
-                            IsExporting = false;
-                            _log.Error(e, "Error while exporting character");
+                            _exportCts.Cancel();
+                            _exportCts.Dispose();
+                            _exportCts = new CancellationTokenSource();
                         }
                     }
                 }
@@ -148,119 +153,17 @@ public class ResourceTreeViewer
         }
     }
 
-    private static CancellationTokenSource? Cts = null;
-
-    private void RunModelExport(ResourceTree tree)
-    {
-        var path = Path.Combine(Path.GetTempPath(), "Penumbra.XandeTest");
-        Directory.CreateDirectory(path);
-        path = Path.Combine(path, $"{tree.Name}-{DateTime.Now:yyyy-MM-dd-HH-mm-ss}");
-        Directory.CreateDirectory(path);
-        var fileName = $"{tree.Name}.json";
-        var filePath = Path.Combine(path, fileName);
-
-        var json = JsonSerializer.Serialize(tree.Nodes.Select(GetResourceNodeAsJson), new JsonSerializerOptions
-        {
-            WriteIndented = true
-        });
-
-        File.WriteAllText(filePath, json);
-
-        _dalamud.Framework.RunOnTick(() =>
-        {
-            _log.Debug($"Exporting character to {path}");
-            // skeletons should only be at the root level so no need to go further
-            var skeletonNodes = tree.Nodes.Where(x => x.Type == Api.Enums.ResourceType.Sklb).ToList();
-            var skeletons = new List<HavokXml>();
-            try
-            {
-
-                foreach (var node in skeletonNodes)
-                {
-                    // cannot use fullpath because things like ivcs are fucky and crash the game
-                    var nodePath = node.FullPath.ToPath();
-                    try
-                    {
-                        var file = _modelExporter.LuminaManager.GetFile<FileResource>(nodePath);
-                        var sklb = SklbFile.FromStream(file.Reader.BaseStream);
-
-                        var xml = _modelExporter.Converter.HkxToXml(sklb.HkxData);
-                        // write xml file without extension
-                        File.WriteAllText(Path.Combine(path, Path.GetFileNameWithoutExtension(nodePath) + ".xml"), xml);
-
-                        skeletons.Add(new HavokXml(xml));
-                        _log.Debug($"Loaded skeleton {nodePath}");
-                        continue;
-                    }
-                    catch (Exception ex)
-                    {
-                        _log.Error(ex, $"Failed to load {nodePath}, falling back to GamePath");
-                    }
-
-                    nodePath = node.GamePath.ToString();
-                    try
-                    {
-                        var file = _modelExporter.LuminaManager.GetFile<FileResource>(nodePath);
-                        var sklb = SklbFile.FromStream(file.Reader.BaseStream);
-
-                        var xml = _modelExporter.Converter.HkxToXml(sklb.HkxData);
-                        skeletons.Add(new HavokXml(xml));
-                        _log.Debug($"Loaded skeleton {nodePath}");
-                        continue;
-                    }
-                    catch (Exception ex)
-                    {
-                        _log.Error(ex, $"Failed to load {nodePath}");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                _log.Error(ex, "Error loading skeletons");
-                IsExporting = false;
-                return Task.CompletedTask;
-            }
-
-
-            return Task.Run(async () =>
-            {
-                try
-                {
-                    await _modelExporter.ExportModel(path, skeletons, tree.Nodes, Cts.Token);
-                    // open path 
-                    Process.Start("explorer.exe", path);
-                }
-                catch (Exception e)
-                {
-                    _log.Error(e, "Error while exporting character");
-                }
-
-                IsExporting = false;
-            }, Cts.Token);
-        });
-    }
-
-    private object GetResourceNodeAsJson(ResourceNode node)
-    {
-        return new
-        {
-            node.Name,
-            Type = node.Type.ToString(),
-            GamePath = node.GamePath.ToString(),
-            node.FullPath.FullName,
-            node.Internal,
-            Children = node.Children.Select(GetResourceNodeAsJson)
-        };
-    }
-
     private Task<ResourceTree[]> RefreshCharacterList()
         => Task.Run(() =>
         {
             try
             {
-                return _treeFactory.FromObjectTable(ResourceTreeFactoryFlags)
+                var response = _treeFactory.FromObjectTable(ResourceTreeFactoryFlags)
                     .Select(entry => entry.ResourceTree)
                     .ToArray();
+
+                _enabledExports = response.ToDictionary(x => unchecked(x.DrawObjectAddress * 31), x => new bool[x.Nodes.Count]);
+                return response;
             }
             finally
             {
@@ -289,8 +192,21 @@ public class ResourceTreeViewer
             using var id = ImRaii.PushId(index);
             ImGui.TableNextColumn();
             var unfolded = _unfolded.Contains(nodePathHash);
+
             using (var indent = ImRaii.PushIndent(level))
             {
+                if (_enabledExports.ContainsKey(pathHash))
+                {
+                    var exports = _enabledExports[pathHash];
+                    var export = exports[index];
+                    if (resourceNode.Type != Api.Enums.ResourceType.Sklb)
+                    {
+                        ImGui.Checkbox("##export", ref export);
+                        _enabledExports[pathHash][index] = export;
+                        ImGui.SameLine(0f, ImGui.GetStyle().ItemInnerSpacing.X);
+                    }
+                }
+
                 var unfoldable = debugMode
                     ? resourceNode.Children.Count > 0
                     : resourceNode.Children.Any(child => !child.Internal);

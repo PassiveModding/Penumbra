@@ -1,11 +1,13 @@
 ﻿using System;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.Text.Json;
 using Dalamud.Plugin.Services;
 using Lumina.Data;
 using Lumina.Data.Files;
 using Lumina.Data.Parsing;
 using Lumina.Models.Models;
+using Penumbra.GameData.Enums;
 using Penumbra.Interop.ResourceTree;
 using SharpGLTF.Materials;
 using SharpGLTF.Scenes;
@@ -19,100 +21,182 @@ using Material = Lumina.Models.Materials.Material;
 using Mesh = Lumina.Models.Models.Mesh;
 using PMtrlFile = Penumbra.GameData.Files.MtrlFile;
 
-namespace Penumbra.Services;
+namespace Penumbra.Services.Xande;
 
 public class ModelExporter
 {
-    public readonly HavokConverter Converter;
-    public readonly LuminaManager LuminaManager;
-    public readonly SklbResolver SklbResolver;
-    public readonly PbdFile Pbd;
+    private readonly HavokConverter _converter;
+    private readonly LuminaManager _luminaManager;
+    private readonly SklbResolver _sklbResolver;
+    private readonly PbdFile _pbd;
     private readonly IPluginLog _log;
+    private readonly DalamudServices _dalamud;
+    private readonly StainService _stainService;
 
-    public ModelExporter(DalamudServices dalamud)
+    // only allow one export at a time due to memory issues
+    private static readonly SemaphoreSlim ExportSemaphore = new(1, 1);
+
+    // only allow one texture export at a time due to memory issues
+    private static readonly SemaphoreSlim TextureSemaphore = new(1, 1);
+
+    public ModelExporter(DalamudServices dalamud, StainService stainService)
     {
-        Converter = new HavokConverter(dalamud.PluginInterface);
-        LuminaManager = new LuminaManager(origPath =>
+        _converter = new HavokConverter(dalamud.PluginInterface);
+        _luminaManager = new LuminaManager(origPath =>
         {
             return null;
         });
-        SklbResolver = new SklbResolver(dalamud.PluginInterface);
-        Pbd = LuminaManager.GetPbdFile();
+        _sklbResolver = new SklbResolver(dalamud.PluginInterface);
+        _pbd = _luminaManager.GetPbdFile();
         _log = dalamud.Log;
+        _dalamud = dalamud;
+        _stainService = stainService;
     }
 
-    /// <summary>Builds a skeleton tree from a list of .sklb paths.</summary>
-    /// <param name="skeletons">A list of HavokXml instances.</param>
-    /// <param name="root">The root bone node.</param>
-    /// <returns>A mapping of bone name to node in the scene.</returns>
-    private Dictionary<string, NodeBuilder> GetBoneMap(IEnumerable<HavokXml> skeletons, out NodeBuilder? root)
+    public Task ExportResourceTree(ResourceTree tree, bool[] enabledNodes, CancellationToken cancellationToken)
     {
-        Dictionary<string, NodeBuilder> boneMap = new();
-        root = null;
+        var path = Path.Combine(Path.GetTempPath(), "Penumbra.XandeTest");
+        Directory.CreateDirectory(path);
+        path = Path.Combine(path, $"{tree.Name}-{DateTime.Now:yyyy-MM-dd-HH-mm-ss}");
+        Directory.CreateDirectory(path);
+        var fileName = $"{tree.Name}.json";
+        var filePath = Path.Combine(path, fileName);
 
-        foreach (var xml in skeletons)
+        var json = JsonSerializer.Serialize(tree.Nodes.Select(GetResourceNodeAsJson), new JsonSerializerOptions
         {
-            var skeleton = xml.GetMainSkeleton();
-            var boneNames = skeleton.BoneNames;
-            var refPose = skeleton.ReferencePose;
-            var parentIndices = skeleton.ParentIndices;
+            WriteIndented = true
+        });
 
-            for (var j = 0; j < boneNames.Length; j++)
+        File.WriteAllText(filePath, json);
+
+        return _dalamud.Framework.RunOnTick(() =>
+        {
+            List<ResourceNode> nodes = new();
+            for (int i = 0; i < enabledNodes.Length; i++)
             {
-                var name = boneNames[j];
-                if (boneMap.ContainsKey(name)) continue;
-
-                var bone = new NodeBuilder(name);
-                bone.SetLocalTransform(XmlUtils.CreateAffineTransform(refPose[j]), false);
-
-                var boneRootId = parentIndices[j];
-                if (boneRootId != -1)
-                {
-                    var parent = boneMap[boneNames[boneRootId]];
-                    parent.AddNode(bone);
-                }
-                else { root = bone; }
-
-                boneMap[name] = bone;
+                if (enabledNodes[i] == false) continue;
+                var node = tree.Nodes[i];
+                nodes.Add(node);
             }
-        }
 
-        return boneMap;
+            _log.Debug($"Exporting character to {path}");
+            // skeletons should only be at the root level so no need to go further
+            // do not exclude skeletons regardless of option (because its annoying)
+            var skeletonNodes = tree.Nodes.Where(x => x.Type == Api.Enums.ResourceType.Sklb).ToList();
+            // if skeleton is for weapon, move it to the end
+            skeletonNodes.Sort((x, y) =>
+            {
+                if (x.GamePath.ToString().Contains("weapon"))
+                {
+                    return 1;
+                }
+
+                if (y.GamePath.ToString().Contains("weapon"))
+                {
+                    return -1;
+                }
+
+                return 0;
+            });
+
+            var skeletons = new List<HavokXml>();
+            try
+            {
+
+                foreach (var node in skeletonNodes)
+                {
+                    // cannot use fullpath because things like ivcs are fucky and crash the game
+                    var nodePath = node.FullPath.ToPath();
+                    try
+                    {
+                        var file = _luminaManager.GetFile<FileResource>(nodePath);
+                        var sklb = SklbFile.FromStream(file.Reader.BaseStream);
+
+                        var xml = _converter.HkxToXml(sklb.HkxData);
+                        // write xml file without extension
+                        File.WriteAllText(Path.Combine(path, Path.GetFileNameWithoutExtension(nodePath) + ".xml"), xml);
+
+                        skeletons.Add(new HavokXml(xml));
+                        _log.Debug($"Loaded skeleton {nodePath}");
+                        continue;
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Error(ex, $"Failed to load {nodePath}, falling back to GamePath");
+                    }
+
+                    nodePath = node.GamePath.ToString();
+                    try
+                    {
+                        var file = _luminaManager.GetFile<FileResource>(nodePath);
+                        var sklb = SklbFile.FromStream(file.Reader.BaseStream);
+
+                        var xml = _converter.HkxToXml(sklb.HkxData);
+                        skeletons.Add(new HavokXml(xml));
+                        _log.Debug($"Loaded skeleton {nodePath}");
+                        continue;
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Error(ex, $"Failed to load {nodePath}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "Error loading skeletons");
+                return Task.CompletedTask;
+            }
+
+
+            return Task.Run(async () =>
+            {
+                try
+                {
+                    await ExportModel(path, skeletons, tree, nodes, cancellationToken);
+                    // open path 
+                    Process.Start("explorer.exe", path);
+                }
+                catch (Exception e)
+                {
+                    _log.Error(e, "Error while exporting character");
+                }
+
+            }, cancellationToken);
+        });
     }
 
-    private static SemaphoreSlim _semaphore = new(1, 1);
+    private object GetResourceNodeAsJson(ResourceNode node)
+    {
+        return new
+        {
+            node.Name,
+            Type = node.Type.ToString(),
+            GamePath = node.GamePath.ToString(),
+            node.FullPath.FullName,
+            node.Internal,
+            Children = node.Children.Select(GetResourceNodeAsJson)
+        };
+    }
 
-    public async Task ExportModel(string exportPath, IEnumerable<HavokXml> skeletons, List<ResourceNode> nodes, CancellationToken cancellationToken = default)
+    private async Task ExportModel(string exportPath, IEnumerable<HavokXml> skeletons, ResourceTree tree, IEnumerable<ResourceNode> nodes, CancellationToken cancellationToken = default)
     {
         _log.Debug($"Exporting model to {exportPath}");
 
-        if (_semaphore.CurrentCount == 0)
+        if (ExportSemaphore.CurrentCount == 0)
         {
             _log.Warning("Export already in progress");
             return;
         }
 
-        await _semaphore.WaitAsync(cancellationToken);
+        await ExportSemaphore.WaitAsync(cancellationToken);
 
         try
         {
-            // chara/human/cXXXX/.../..._XXXXX.sklb
-            var raceSkeletonRegex = new Regex(@"^chara/human/c(\d+)/");
-            var race = nodes.Select(x => x.GamePath.ToString())
-                .Where(x => raceSkeletonRegex.IsMatch(x))
-                .Select(x => raceSkeletonRegex.Match(x).Groups[1].Value)
-                .FirstOrDefault();
-
-            ushort? deform = null;
-            if (race != null)
-            {
-                deform = ushort.Parse(race);
-                _log.Debug($"Deform: {deform}");
-            }
-
-            var boneMap = GetBoneMap(skeletons.ToArray(), out var root);
+            ushort deform = (ushort)tree.RaceCode;
+            var boneMap = Helpers.GetBoneMap(skeletons.ToArray(), out var root);
             var joints = boneMap.Values.ToArray();
-            var raceDeformer = new RaceDeformer(Pbd, boneMap);
+            var raceDeformer = new RaceDeformer(_pbd, boneMap);
             var modelNodes = nodes.Where(x => x.Type == Api.Enums.ResourceType.Mdl).ToArray();
             var glTFScene = new SceneBuilder(modelNodes.Length > 0 ? modelNodes[0].GamePath.ToString() : "scene");
             if (root != null)
@@ -142,69 +226,21 @@ public class ModelExporter
             //glTFModel.SaveGLB(Path.Combine(glbFolder, "glb.glb"));
 
             _log.Debug($"Exported model to {exportPath}");
-        } 
+        }
         catch (Exception e)
         {
             _log.Error(e, "Failed to export model");
-        } 
+        }
         finally
         {
-            _semaphore.Release();
+            ExportSemaphore.Release();
         }
-    }
-
-    /// <summary>
-    /// Compute the distance between two strings.
-    /// </summary>
-    public static int ComputeLD(string s, string t)
-    {
-        int n = s.Length;
-        int m = t.Length;
-        int[,] d = new int[n + 1, m + 1];
-
-        // Step 1
-        if (n == 0)
-        {
-            return m;
-        }
-
-        if (m == 0)
-        {
-            return n;
-        }
-
-        // Step 2
-        for (int i = 0; i <= n; d[i, 0] = i++)
-        {
-        }
-
-        for (int j = 0; j <= m; d[0, j] = j++)
-        {
-        }
-
-        // Step 3
-        for (int i = 1; i <= n; i++)
-        {
-            //Step 4
-            for (int j = 1; j <= m; j++)
-            {
-                // Step 5
-                int cost = (t[j - 1] == s[i - 1]) ? 0 : 1;
-
-                // Step 6
-                d[i, j] = Math.Min(
-                    Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1),
-                    d[i - 1, j - 1] + cost);
-            }
-        }
-        // Step 7
-        return d[n, m];
     }
 
     private async Task HandleModel(ResourceNode node, RaceDeformer raceDeformer, ushort? deform, string exportPath, Dictionary<string, NodeBuilder> boneMap, NodeBuilder[] joints, SceneBuilder glTFScene, CancellationToken cancellationToken)
     {
         var path = node.FullPath.ToPath();
-        var file = LuminaManager.GetFile<FileResource>(path);
+        var file = _luminaManager.GetFile<FileResource>(path);
         if (!TryGetModel(node, deform, out var modelPath, out var model))
         {
             return;
@@ -227,6 +263,7 @@ public class ModelExporter
         var nodeChildren = node.Children.ToList();
 
         var materials = new List<(string fullpath, string gamepath, MaterialBuilder material)>();
+        var shaderLogs = new List<string>();
         foreach (var child in nodeChildren)
         {
             if (child == null)
@@ -244,8 +281,8 @@ public class ModelExporter
             try
             {
                 mtrlFile = Path.IsPathRooted(child.FullPath.ToPath())
-                   ? LuminaManager.GameData.GetFileFromDisk<MtrlFile>(child.FullPath.ToPath(), child.GamePath.ToString())
-                   : LuminaManager.GameData.GetFile<MtrlFile>(child.FullPath.ToPath());
+                   ? _luminaManager.GameData.GetFileFromDisk<MtrlFile>(child.FullPath.ToPath(), child.GamePath.ToString())
+                   : _luminaManager.GameData.GetFile<MtrlFile>(child.FullPath.ToPath());
                 material = new Material(mtrlFile);
             }
             catch (Exception e)
@@ -255,16 +292,17 @@ public class ModelExporter
             }
 
             // unfortunately processing multiple materials at once can corrupt game memory >:(
-            await _semaphoreSlim.WaitAsync(cancellationToken);
+            await TextureSemaphore.WaitAsync(cancellationToken);
             try
             {
-                var glTFMaterial = await ComposeTextures(mtrlFile, material, exportPath, child?.Children, cancellationToken);
-                       
+                var glTFMaterial = ComposeTextures(mtrlFile, material, exportPath, child?.Children, cancellationToken, out var shaderLog);
+
                 if (glTFMaterial == null)
                 {
                     return;
                 }
 
+                shaderLogs.Add(shaderLog);
                 materials.Add((child.FullPath.ToPath(), child.GamePath.ToString(), glTFMaterial));
             }
             catch (Exception e)
@@ -274,13 +312,13 @@ public class ModelExporter
             }
             finally
             {
-                _semaphoreSlim.Release();
+                TextureSemaphore.Release();
             }
         }
 
         foreach (var mesh in meshes)
         {
-            mesh.Material.Update(LuminaManager.GameData);
+            mesh.Material.Update(_luminaManager.GameData);
         }
 
         _log.Debug($"Handling model {name} with {meshes.Length} meshes\n{string.Join("\n", meshes.Select(x => x.Material.ResolvedPath))}\nUsing materials\n{string.Join("\n", materials.Select(x =>
@@ -291,18 +329,18 @@ public class ModelExporter
             }
 
             return $"{x.gamepath} -> {x.fullpath}";
-        }))}");
+        }))}\n{string.Join("\n", shaderLogs)}");
 
         foreach (var mesh in meshes)
-        { 
+        {
             // try get material from materials
             var material = materials.FirstOrDefault(x => x.fullpath == mesh.Material.ResolvedPath || x.gamepath == mesh.Material.ResolvedPath);
 
             if (material == default)
             {
                 // match most similar material from list
-                var match = materials.Select(x => (x.fullpath, x.gamepath, ComputeLD(x.fullpath, mesh.Material.ResolvedPath))).OrderBy(x => x.Item3).FirstOrDefault();
-                var match2 = materials.Select(x => (x.fullpath, x.gamepath, ComputeLD(x.gamepath, mesh.Material.ResolvedPath))).OrderBy(x => x.Item3).FirstOrDefault();
+                var match = materials.Select(x => (x.fullpath, x.gamepath, Helpers.ComputeLD(x.fullpath, mesh.Material.ResolvedPath))).OrderBy(x => x.Item3).FirstOrDefault();
+                var match2 = materials.Select(x => (x.fullpath, x.gamepath, Helpers.ComputeLD(x.gamepath, mesh.Material.ResolvedPath))).OrderBy(x => x.Item3).FirstOrDefault();
 
                 if (match.Item3 < match2.Item3)
                 {
@@ -333,7 +371,7 @@ public class ModelExporter
             {
                 _log.Error(e, $"Failed to handle mesh creation for {mesh.Material.ResolvedPath}");
                 continue;
-            }            
+            }
         }
     }
 
@@ -413,13 +451,13 @@ public class ModelExporter
         {
             return true;
         }
-        
+
         if (TryLoadModel(node.GamePath.ToString(), out model))
         {
             return true;
         }
 
-        if (TryLoadRacialModel(node.GamePath.ToString(), deform, out string newPath, out model))
+        if (TryLoadRacialModel(node.GamePath.ToString(), deform, out var newPath, out model))
         {
             return true;
         }
@@ -435,7 +473,7 @@ public class ModelExporter
         model = null;
         try
         {
-            model = LuminaManager.GetModel(path);
+            model = _luminaManager.GetModel(path);
             return true;
         }
         catch (Exception e)
@@ -457,7 +495,7 @@ public class ModelExporter
         newPath = Regex.Replace(path.ToString(), @"c\d+", $"c{deform}");
         try
         {
-            model = LuminaManager.GetModel(newPath);
+            model = _luminaManager.GetModel(newPath);
             return true;
         }
         catch
@@ -466,112 +504,20 @@ public class ModelExporter
         }
     }
 
-    private (Bitmap, Bitmap, Bitmap) CalculateCharacterShaderPack(Material xivMaterial, Bitmap normal)
-    {
-        var diffuse = (Bitmap)normal.Clone();
-        var specular = (Bitmap)normal.Clone();
-        var emission = (Bitmap)normal.Clone();
-
-        var colorSetInfo = xivMaterial.File!.ColorSetInfo;
-
-        for (var x = 0; x < normal.Width; x++)
-        {
-            for (var y = 0; y < normal.Height; y++)
-            {
-                var normalPixel = normal.GetPixel(x, y);
-
-                var colorSetIndex1 = normalPixel.A / 17 * 16;
-                var colorSetBlend = normalPixel.A % 17 / 17.0;
-                var colorSetIndexT2 = normalPixel.A / 17;
-                var colorSetIndex2 = (colorSetIndexT2 >= 15 ? 15 : colorSetIndexT2 + 1) * 16;
-
-                // to fix transparency issues 
-                // normal.SetPixel(x, y, Color.FromArgb(255, normalPixel.R, normalPixel.G, 255));
-                normal.SetPixel(x, y, Color.FromArgb(normalPixel.B, normalPixel.R, normalPixel.G, 255));
-
-                var diffuseBlendColour = ColorUtility.BlendColorSet(in colorSetInfo, colorSetIndex1, colorSetIndex2, normalPixel.B, colorSetBlend, ColorUtility.TextureType.Diffuse);
-                var specularBlendColour = ColorUtility.BlendColorSet(in colorSetInfo, colorSetIndex1, colorSetIndex2, 255, colorSetBlend, ColorUtility.TextureType.Specular);
-                var emissionBlendColour = ColorUtility.BlendColorSet(in colorSetInfo, colorSetIndex1, colorSetIndex2, 255, colorSetBlend, ColorUtility.TextureType.Emissive);
-
-                // Set the blended colors in the respective bitmaps
-                diffuse.SetPixel(x, y, diffuseBlendColour);
-                specular.SetPixel(x, y, specularBlendColour);
-                emission.SetPixel(x, y, emissionBlendColour);
-            }
-        }
-
-        return (diffuse, specular, emission);
-    }
-
-    private (Bitmap, Bitmap) CalculateSpecularOcclusion(Bitmap mask, Bitmap specularMap)
-    {
-        var occlusion = (Bitmap)mask.Clone();
-
-        for (var x = 0; x < mask.Width; x++)
-        {
-            for (var y = 0; y < mask.Height; y++)
-            {
-                var maskPixel = mask.GetPixel(x, y);
-                var specularPixel = specularMap.GetPixel(x, y);
-
-                // Calculate the new RGB channels for the specular pixel based on the mask pixel
-                specularMap.SetPixel(x, y, Color.FromArgb(
-                    specularPixel.A,
-                    Convert.ToInt32(specularPixel.R * Math.Pow(maskPixel.G / 255.0, 2)),
-                    Convert.ToInt32(specularPixel.G * Math.Pow(maskPixel.G / 255.0, 2)),
-                    Convert.ToInt32(specularPixel.B * Math.Pow(maskPixel.G / 255.0, 2))
-                ));
-
-                var occlusionPixel = occlusion.GetPixel(x, y);
-
-                // Set the R channel of occlusion pixel to 255 and keep the G and B channels the same
-                occlusion.SetPixel(x, y, Color.FromArgb(
-                    255,
-                    occlusionPixel.R,
-                    occlusionPixel.R,
-                    occlusionPixel.R
-                ));
-            }
-        }
-
-        var result = (specularMap, occlusion);
-        return result;
-    }
-
     public unsafe Bitmap GetTextureBuffer(string path, string? gamePath = null)
     {
-        var actualPath = LuminaManager.FileResolver?.Invoke(path) ?? path;
+        var actualPath = _luminaManager.FileResolver?.Invoke(path) ?? path;
         var texFile = Path.IsPathRooted(actualPath)
-            ? LuminaManager.GameData.GetFileFromDisk<TexFile>(actualPath, gamePath)
-            : LuminaManager.GameData.GetFile<TexFile>(actualPath);
+            ? _luminaManager.GameData.GetFileFromDisk<TexFile>(actualPath, gamePath)
+            : _luminaManager.GameData.GetFile<TexFile>(actualPath);
         if (texFile == null) throw new Exception($"Lumina was unable to fetch a .tex file from {path}.");
         var texBuffer = texFile.TextureBuffer.Filter(format: TexFile.TextureFormat.B8G8R8A8);
         fixed (byte* raw = texBuffer.RawData) { return new Bitmap(texBuffer.Width, texBuffer.Height, texBuffer.Width * 4, PixelFormat.Format32bppArgb, (nint)raw); }
     }
 
-    private void ColorsetShit(MtrlFile mtrl)
+    private MaterialBuilder? ComposeTextures(MtrlFile mtrlFile, Material xivMaterial, string outputDir, IEnumerable<ResourceNode>? nodes, CancellationToken cancellationToken, out string? log)
     {
-        // create penumbra MtrlFile from lumina MtrlFile
-        var penumbraMtrl = new PMtrlFile(mtrl.Data);
-
-        // get colorset info
-        if (penumbraMtrl.HasTable && penumbraMtrl.HasDyeTable)
-        {
-            _log.Debug($"MtrlFile has dye table: {mtrl.FilePath.Path}");
-            // do something with dye table on the texture
-
-        }
-        else if (penumbraMtrl.HasTable)
-        {
-            _log.Debug($"MtrlFile has table: {mtrl.FilePath.Path}");
-            // set default colorset
-        }
-    }
-
-    // Compose the textures for the glTF material using the xivMaterial information
-    private static SemaphoreSlim _semaphoreSlim = new SemaphoreSlim(1);
-    private async Task<MaterialBuilder?> ComposeTextures(MtrlFile mtrlFile, Material xivMaterial, string outputDir, IEnumerable<ResourceNode>? nodes, CancellationToken cancellationToken)
-    {
+        log = "";
         var xivTextureMap = new Dictionary<TextureUsage, Bitmap>();
 
         foreach (var xivTexture in xivMaterial.Textures)
@@ -606,40 +552,41 @@ public class ModelExporter
                 }
             }
 
-            // check outputdir if texture already exists
-            var textureFileName = GetTextureFileName(xivTexture.TextureUsageRaw);
-            var texturePath2 = Path.Combine(outputDir, $"{mtrlFile.FilePath.Path.Replace("\\", "/").Split("/").Last()}_{textureFileName}.png");
-
-
             var textureBuffer = GetTextureBuffer(texturePath, xivTexture.TexturePath);
-
             xivTextureMap.Add(xivTexture.TextureUsageRaw, textureBuffer);
         }
 
         // reference for this fuckery
         // https://docs.google.com/spreadsheets/u/0/d/1kIKvVsW3fOnVeTi9iZlBDqJo6GWVn6K6BCUIRldEjhw/htmlview#
 
+        var initTextureMap = xivTextureMap.Select(x => x.Key).ToList();
+
         // genuinely not sure when to set to blend, but I think its needed for opacity on some stuff
-        SharpGLTF.Materials.AlphaMode alphaMode = SharpGLTF.Materials.AlphaMode.MASK;
+        var alphaMode = SharpGLTF.Materials.AlphaMode.MASK;
+        var backfaceCulling = true;
         switch (xivMaterial.ShaderPack)
         {
             case "character.shpk":
                 {
-                    alphaMode = SharpGLTF.Materials.AlphaMode.MASK;
+                    //alphaMode = SharpGLTF.Materials.AlphaMode.MASK;
                     // for character gear, split the normal map into diffuse, specular and emission
                     if (xivTextureMap.TryGetValue(TextureUsage.SamplerNormal, out var normal))
                     {
-                        var (diffuse, specular, emission) = CalculateCharacterShaderPack(xivMaterial, normal);
-                        // Add the shader pack textures to xivTextureMap
-                        // Use TryAdd to avoid overwriting existing textures (if any)
-                        xivTextureMap.TryAdd(TextureUsage.SamplerDiffuse, diffuse);
-                        xivTextureMap.TryAdd(TextureUsage.SamplerSpecular, specular);
-                        xivTextureMap.TryAdd(TextureUsage.SamplerReflection, emission);
+                        xivTextureMap.TryGetValue(TextureUsage.SamplerDiffuse, out var initDifuse);
+                        if (!xivTextureMap.ContainsKey(TextureUsage.SamplerDiffuse) || !xivTextureMap.ContainsKey(TextureUsage.SamplerSpecular) || !xivTextureMap.ContainsKey(TextureUsage.SamplerReflection))
+                        {
+                            var (diffuse, specular, emission) = Helpers.ComputeCharacterModelTextures(xivMaterial, normal, initDifuse);
+
+                            // If the textures already exist, tryadd will make sure they are not overwritten
+                            xivTextureMap.TryAdd(TextureUsage.SamplerDiffuse, diffuse);
+                            xivTextureMap.TryAdd(TextureUsage.SamplerSpecular, specular);
+                            xivTextureMap.TryAdd(TextureUsage.SamplerReflection, emission);
+                        }
                     }
 
                     if (xivTextureMap.TryGetValue(TextureUsage.SamplerMask, out var mask) && xivTextureMap.TryGetValue(TextureUsage.SamplerSpecular, out var specularMap))
                     {
-                        var (specular, occlusion) = CalculateSpecularOcclusion(mask, specularMap);
+                        var occlusion = Helpers.CalculateOcclusion(mask, specularMap);
 
                         // Add the specular occlusion texture to xivTextureMap
                         xivTextureMap.Add(TextureUsage.SamplerWaveMap, occlusion);
@@ -649,11 +596,15 @@ public class ModelExporter
             case "skin.shpk":
                 {
                     alphaMode = SharpGLTF.Materials.AlphaMode.MASK;
-                    // skin should use normalmap as alphachannel for Principled BSDF
-                    // currently AlphaMode.Mask means we pull it from vertexvolor
-
                     if (xivTextureMap.TryGetValue(TextureUsage.SamplerNormal, out var normal))
                     {
+                        xivTextureMap.TryGetValue(TextureUsage.SamplerDiffuse, out var diffuse);
+
+                        if (diffuse == null) throw new Exception("Diffuse texture is null");
+
+                        // use blue for opacity
+                        Helpers.CopyNormalBlueChannelToDiffuseAlphaChannel(normal, diffuse);
+
                         // use blue for opacity
                         for (var x = 0; x < normal.Width; x++)
                         {
@@ -669,11 +620,43 @@ public class ModelExporter
             case "hair.shpk":
                 {
                     alphaMode = SharpGLTF.Materials.AlphaMode.MASK;
+                    backfaceCulling = false;
+                    if (xivTextureMap.TryGetValue(TextureUsage.SamplerNormal, out var normal))
+                    {
+                        var specular = new Bitmap(normal.Width, normal.Height, PixelFormat.Format32bppArgb);
+                        var colorSetInfo = xivMaterial.File!.ColorSetInfo;
+
+                        for (int x = 0; x < normal.Width; x++)
+                        {
+                            for (int y = 0; y < normal.Height; y++)
+                            {
+                                var normalPixel = normal.GetPixel(x, y);
+                                var colorSetIndex1 = normalPixel.A / 17 * 16;
+                                var colorSetBlend = normalPixel.A % 17 / 17.0;
+                                var colorSetIndexT2 = normalPixel.A / 17;
+                                var colorSetIndex2 = (colorSetIndexT2 >= 15 ? 15 : colorSetIndexT2 + 1) * 16;
+
+                                var specularBlendColour = ColorUtility.BlendColorSet(in colorSetInfo, colorSetIndex1, colorSetIndex2, 255, colorSetBlend, ColorUtility.TextureType.Specular);
+
+                                specular.SetPixel(x, y, Color.FromArgb(normalPixel.B, specularBlendColour.R, specularBlendColour.G, specularBlendColour.B));
+                            }
+                        }
+
+                        xivTextureMap.Add(TextureUsage.SamplerSpecular, specular);
+
+                        if (xivTextureMap.TryGetValue(TextureUsage.SamplerMask, out var mask) && xivTextureMap.TryGetValue(TextureUsage.SamplerSpecular, out var specularMap))
+                        {
+                            var occlusion = Helpers.CalculateOcclusion(mask, specularMap);
+
+                            // Add the specular occlusion texture to xivTextureMap
+                            xivTextureMap.Add(TextureUsage.SamplerWaveMap, occlusion);
+                        }
+                    }
                     break;
                 }
             case "iris.shpk":
                 {
-                    alphaMode = SharpGLTF.Materials.AlphaMode.MASK;
+                    //alphaMode = SharpGLTF.Materials.AlphaMode.MASK;
                     break;
                 }
             default:
@@ -681,13 +664,20 @@ public class ModelExporter
                 break;
         }
 
-        _log.Debug($"Shader pack: {mtrlFile.FilePath.Path}\n{string.Join("\n", xivTextureMap.Select(x => x.Key.ToString()))}");
+        log = $"Shader pack: {mtrlFile.FilePath.Path}\n" +
+            $"Type: {xivMaterial.ShaderPack}\n" +
+            $"{string.Join("\n", xivTextureMap.Select(x =>
+            {
+                // if init texturemap does not contain key show (new)
+                var isNew = !initTextureMap.Contains(x.Key);
+                return $"{x.Key} -> {x.Value.Width}x{x.Value.Height} {(isNew ? "(new)" : "")}";
+            }))}";
 
         var glTFMaterial = new MaterialBuilder
         {
             Name = mtrlFile.FilePath.Path,
             AlphaMode = alphaMode,
-            DoubleSided = true
+            DoubleSided = !backfaceCulling
         };
 
         ExportTextures(glTFMaterial, xivTextureMap, outputDir);
@@ -695,95 +685,65 @@ public class ModelExporter
         return glTFMaterial;
     }
 
-    private void ExportTexture(MaterialBuilder glTFMaterial, TextureUsage textureUsage, Bitmap bitmap, string outputDir)
-    {
-        var name = glTFMaterial.Name.Replace("\\", "/").Split("/").Last().Split(".").First();
-        string texturePath = $"{name}_{GetTextureFileName(textureUsage)}.png";
-        var path = Path.Combine(outputDir, texturePath);
-
-        // Save the texture to the output directory and update the glTF material with respective image paths
-        switch (textureUsage)
-        {
-            case TextureUsage.SamplerColorMap0:
-            case TextureUsage.SamplerDiffuse:
-                bitmap.Save(path);
-                glTFMaterial.WithBaseColor(path);
-                break;
-            case TextureUsage.SamplerNormalMap0:
-            case TextureUsage.SamplerNormal:
-                bitmap.Save(path);
-                glTFMaterial.WithNormal(path, 1);
-                break;
-            case TextureUsage.SamplerSpecularMap0:
-            case TextureUsage.SamplerSpecular:
-                bitmap.Save(path);
-                glTFMaterial.WithSpecularColor(path);
-                break;
-            case TextureUsage.SamplerWaveMap:
-                bitmap.Save(path);
-                glTFMaterial.WithOcclusion(path);
-                break;
-            case TextureUsage.SamplerReflection:
-                bitmap.Save(path);
-                glTFMaterial.WithEmissive(path, new Vector3(255, 255, 255));
-                break;
-            case TextureUsage.SamplerMask:
-                // Do something with this texture
-                bitmap.Save(path);
-                break;
-            default:
-                _log.Warning("Unhandled TextureUsage: " + textureUsage);
-                bitmap.Save(path);
-                break;
-        }
-    }
 
     private void ExportTextures(MaterialBuilder glTFMaterial, Dictionary<TextureUsage, Bitmap> xivTextureMap, string outputDir)
     {
-        var num = 0;
         foreach (var xivTexture in xivTextureMap)
         {
             ExportTexture(glTFMaterial, xivTexture.Key, xivTexture.Value, outputDir);
-            num++;
         }
 
         // Set the metallic roughness factor to 0
         glTFMaterial.WithMetallicRoughness(0);
     }
 
-
-    private string? GetTextureFileName(TextureUsage textureUsage)
+    private void ExportTexture(MaterialBuilder glTFMaterial, TextureUsage textureUsage, Bitmap bitmap, string outputDir)
     {
+        // tbh can overwrite or delete these after use but theyre helpful for debugging
+        var name = glTFMaterial.Name.Replace("\\", "/").Split("/").Last().Split(".").First();
+        string path;
+
+        // Save the texture to the output directory and update the glTF material with respective image paths
         switch (textureUsage)
         {
             case TextureUsage.SamplerColorMap0:
             case TextureUsage.SamplerDiffuse:
-                return "diffuse";
+                path = Path.Combine(outputDir, $"{name}_diffuse.png");
+                bitmap.Save(path);
+                glTFMaterial.WithBaseColor(path);
+                break;
             case TextureUsage.SamplerNormalMap0:
             case TextureUsage.SamplerNormal:
-                return "normal";
+                path = Path.Combine(outputDir, $"{name}_normal.png");
+                bitmap.Save(path);
+                glTFMaterial.WithNormal(path, 1);
+                break;
             case TextureUsage.SamplerSpecularMap0:
             case TextureUsage.SamplerSpecular:
-                return "specular";
+                path = Path.Combine(outputDir, $"{name}_specular.png");
+                bitmap.Save(path);
+                glTFMaterial.WithSpecularColor(path);
+                break;
             case TextureUsage.SamplerWaveMap:
-                return "occlusion";
+                path = Path.Combine(outputDir, $"{name}_occlusion.png");
+                bitmap.Save(path);
+                glTFMaterial.WithOcclusion(path);
+                break;
             case TextureUsage.SamplerReflection:
-                return "emissive";
+                path = Path.Combine(outputDir, $"{name}_emissive.png");
+                bitmap.Save(path);
+                glTFMaterial.WithEmissive(path, new Vector3(255, 255, 255));
+                break;
             case TextureUsage.SamplerMask:
-                return "mask";
-            case TextureUsage.Sampler:
-            case TextureUsage.Sampler0:
-            case TextureUsage.Sampler1:
-            case TextureUsage.SamplerCatchlight:
-            case TextureUsage.SamplerColorMap1:
-            case TextureUsage.SamplerEnvMap:
-            case TextureUsage.SamplerNormalMap1:
-            case TextureUsage.SamplerSpecularMap1:
-            case TextureUsage.SamplerWaveletMap0:
-            case TextureUsage.SamplerWaveletMap1:
-            case TextureUsage.SamplerWhitecapMap:
+                path = Path.Combine(outputDir, $"{name}_mask.png");
+                // Do something with this texture
+                bitmap.Save(path);
+                break;
             default:
-                return textureUsage.ToString();
+                _log.Warning("Unhandled TextureUsage: " + textureUsage);
+                path = Path.Combine(outputDir, $"{name}_{textureUsage}.png");
+                bitmap.Save(path);
+                break;
         }
     }
 }
