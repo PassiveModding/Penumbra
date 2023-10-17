@@ -259,7 +259,8 @@ public class ModelExporter
 
         var name = Path.GetFileNameWithoutExtension(path);
         var raceCode = raceDeformer.RaceCodeFromPath(path);
-        var meshes = model.Meshes.Where(x => x.Types.Contains(Mesh.MeshType.Main)).ToArray();
+        var ignoreStupidEyeMeshRefex = new Regex(@"^/mt_c\d+f.+_etc_b.mtrl$");
+        var meshes = model.Meshes.Where(x => x.Types.Contains(Mesh.MeshType.Main) && !ignoreStupidEyeMeshRefex.IsMatch(x.Material.MaterialPath.ToString() ?? "")).ToArray();
         var nodeChildren = node.Children.ToList();
 
         var materials = new List<(string fullpath, string gamepath, MaterialBuilder material)>();
@@ -684,7 +685,29 @@ public class ModelExporter
                 }
             case "iris.shpk":
                 {
-                    //alphaMode = SharpGLTF.Materials.AlphaMode.MASK;
+                    if (xivTextureMap.TryGetValue(TextureUsage.SamplerNormal, out var normal))
+                    {
+                        var specular = new Bitmap(normal.Width, normal.Height, PixelFormat.Format32bppArgb);
+                        var colorSetInfo = xivMaterial.File!.ColorSetInfo;
+
+                        for (int x = 0; x < normal.Width; x++)
+                        {
+                            for (int y = 0; y < normal.Height; y++)
+                            {
+                                var normalPixel = normal.GetPixel(x, y);
+                                var colorSetIndex1 = normalPixel.A / 17 * 16;
+                                var colorSetBlend = normalPixel.A % 17 / 17.0;
+                                var colorSetIndexT2 = normalPixel.A / 17;
+                                var colorSetIndex2 = (colorSetIndexT2 >= 15 ? 15 : colorSetIndexT2 + 1) * 16;
+
+                                var specularBlendColour = ColorUtility.BlendColorSet(in colorSetInfo, colorSetIndex1, colorSetIndex2, 255, colorSetBlend, ColorUtility.TextureType.Specular);
+
+                                specular.SetPixel(x, y, Color.FromArgb(255, specularBlendColour.R, specularBlendColour.G, specularBlendColour.B));
+                            }
+                        }
+
+                        xivTextureMap.Add(TextureUsage.SamplerSpecular, specular);
+                    }
                     break;
                 }
             default:
