@@ -646,10 +646,38 @@ public class ModelExporter
 
                         if (xivTextureMap.TryGetValue(TextureUsage.SamplerMask, out var mask) && xivTextureMap.TryGetValue(TextureUsage.SamplerSpecular, out var specularMap))
                         {
-                            var occlusion = Helpers.CalculateOcclusion(mask, specularMap);
+                            var diffuse = (Bitmap)mask.Clone();
+
+                            for (var x = 0; x < mask.Width; x++)
+                            {
+                                for (var y = 0; y < mask.Height; y++)
+                                {
+                                    var maskPixel = mask.GetPixel(x, y);
+                                    var specularPixel = specularMap.GetPixel(x, y);
+                                    var normalPixel = normal.GetPixel(x, y);
+
+                                    // Calculate the new RGB channels for the specular pixel based on the mask pixel
+                                    specularMap.SetPixel(x, y, Color.FromArgb(
+                                        specularPixel.A,
+                                        Convert.ToInt32(specularPixel.R * Math.Pow(maskPixel.G / 255.0, 2)),
+                                        Convert.ToInt32(specularPixel.G * Math.Pow(maskPixel.G / 255.0, 2)),
+                                        Convert.ToInt32(specularPixel.B * Math.Pow(maskPixel.G / 255.0, 2))
+                                    ));
+
+
+                                    // Copy alpha channel from normal to diffuse
+                                    var diffusePixel = diffuse.GetPixel(x, y);
+                                    diffuse.SetPixel(x, y, Color.FromArgb(
+                                        normalPixel.A,
+                                        diffusePixel.R,
+                                        diffusePixel.R,
+                                        diffusePixel.R
+                                    ));
+                                }
+                            }
 
                             // Add the specular occlusion texture to xivTextureMap
-                            xivTextureMap.Add(TextureUsage.SamplerWaveMap, occlusion);
+                            xivTextureMap.Add(TextureUsage.SamplerDiffuse, diffuse);
                         }
                     }
                     break;
