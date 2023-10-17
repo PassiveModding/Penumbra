@@ -98,46 +98,25 @@
           "System.ValueTuple": "4.5.0"
         }
       },
-      "lumina": {
+      "ottergui": {
         "type": "Project"
       },
-      "lumina.excel": {
-        "type": "Project",
-        "dependencies": {
-          "Lumina": "[2.4.2, )"
-        }
-      },
-      "ottergui": {
-        "type": "Project",
-        "dependencies": {
-          "Lumina": "[2.4.2, )"
-        }
-      },
       "penumbra.api": {
-        "type": "Project",
-        "dependencies": {
-          "Lumina": "[2.4.2, )"
-        }
+        "type": "Project"
       },
       "penumbra.gamedata": {
         "type": "Project",
         "dependencies": {
-          "Lumina": "[2.4.2, )",
-          "Lumina.Excel": "[1.0.0, )",
           "Penumbra.Api": "[1.0.11, )",
           "Penumbra.String": "[1.0.4, )"
         }
       },
       "penumbra.string": {
-        "type": "Project",
-        "dependencies": {
-          "Lumina": "[2.4.2, )"
-        }
+        "type": "Project"
       },
       "xande": {
         "type": "Project",
         "dependencies": {
-          "Lumina": "[2.4.2, )",
           "SharpGLTF.Core": "[1.0.0-alpha0028, )",
           "SharpGLTF.Toolkit": "[1.0.0-alpha0028, )",
           "System.Drawing.Common": "[8.0.0-preview.2.23128.3, )"

@@ -46,7 +46,7 @@
             <HintPath>$(DalamudLibPath)ImGuiScene.dll</HintPath>
             <Private>False</Private>
         </Reference>
-        <!-- <Reference Include="Lumina">
+        <Reference Include="Lumina">
             <HintPath>$(DalamudLibPath)Lumina.dll</HintPath>
             <Private>False</Private>
         </Reference> 
@@ -54,7 +54,6 @@
             <HintPath>$(DalamudLibPath)Lumina.Excel.dll</HintPath>
             <Private>False</Private>
         </Reference> 
-        -->
         <Reference Include="FFXIVClientStructs">
             <HintPath>$(DalamudLibPath)FFXIVClientStructs.dll</HintPath>
             <Private>False</Private>
@@ -76,8 +75,6 @@
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\Lumina.Excel\src\Lumina.Excel\Lumina.Excel.csproj" />
-        <ProjectReference Include="..\Lumina\src\Lumina\Lumina.csproj" />
         <ProjectReference Include="..\OtterGui\OtterGui.csproj" />
         <ProjectReference Include="..\Penumbra.GameData\Penumbra.GameData.csproj" />
         <ProjectReference Include="..\Penumbra.Api\Penumbra.Api.csproj" />
