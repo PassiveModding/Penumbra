@@ -10,6 +10,7 @@ using Penumbra.Mods;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Scene;
 using OtterGui.Compression;
 using Penumbra.Api.Enums;
+using Penumbra.Api.Models;
 using Penumbra.GameData.Actors;
 using Penumbra.Interop.ResourceLoading;
 using Penumbra.Mods.Manager;
@@ -1013,6 +1014,32 @@ public class PenumbraApi : IDisposable, IPenumbraApi
             _                   => Task.FromException(new Exception($"Invalid input value {textureType}.")),
         };
     // @formatter:on
+
+    public IReadOnlyList<ResourceTreeDTO> GetResourceTrees()
+    {
+        static ResourceNodeDTO RecursiveBuildNode(ResourceNode node) => new(node.Name, node.FallbackName,
+            node.Icon.ToString(), node.Type,
+            node.ObjectAddress, node.ResourceHandle,
+            node.PossibleGamePaths.Select(x => x.ToString()).ToArray(),
+            node.FullPath.ToPath(),
+            node.Length, node.Internal,
+            node.Children.Select(RecursiveBuildNode).ToList(),
+            node.GamePath.ToString());
+
+        var resourceTree = _resourceTreeFactory.FromObjectTable(ResourceTreeFactory.Flags.RedactExternalPaths |
+        ResourceTreeFactory.Flags.WithUiData |
+        ResourceTreeFactory.Flags.WithOwnership);
+        var response = resourceTree.Select(res => new ResourceTreeDTO(res.ResourceTree.Name,
+            res.ResourceTree.GameObjectIndex, res.ResourceTree.GameObjectAddress,
+            res.ResourceTree.DrawObjectAddress, res.ResourceTree.LocalPlayerRelated,
+            res.ResourceTree.PlayerRelated, res.ResourceTree.Networked,
+            res.ResourceTree.CollectionName,
+            res.ResourceTree.Nodes.Select(RecursiveBuildNode).ToList(),
+            res.ResourceTree.CustomizeData,
+            res.ResourceTree.RaceCode.ToString()))
+            .ToList();
+        return response;
+    }
 
     public IReadOnlyDictionary<string, string[]>?[] GetGameObjectResourcePaths(ushort[] gameObjects)
     {
