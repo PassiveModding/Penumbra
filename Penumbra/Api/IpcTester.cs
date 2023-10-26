@@ -1437,6 +1437,7 @@ public class IpcTester : IDisposable
         private (string, IReadOnlyDictionary<string, string[]>?)[]?                        _lastPlayerResourcePaths;
         private (string, IReadOnlyDictionary<nint, (string, string, ChangedItemIcon)>?)[]? _lastGameObjectResourcesOfType;
         private (string, IReadOnlyDictionary<nint, (string, string, ChangedItemIcon)>?)[]? _lastPlayerResourcesOfType;
+        private (string, IReadOnlyList<(string, string?)>)[]                               _lastGameObjectResourceInheritance;
         private TimeSpan                                                                   _lastCallDuration;
 
         public ResourceTree(DalamudPluginInterface pi, IObjectTable objects)
@@ -1522,12 +1523,52 @@ public class IpcTester : IDisposable
 
                 ImGui.OpenPopup(nameof(Ipc.GetPlayerResourcesOfType));
             }
+            
+            DrawIntro(Ipc.GetGameObjectResourceInheritance.Label, "Get GameObject resource inheritance");
+            if (ImGui.Button("Get##GameObjectResourceInheritance"))
+            {
+                var gameObjects = GetSelectedGameObjects();
+                var subscriber  = Ipc.GetGameObjectResourceInheritance.Subscriber(_pi);
+                _stopwatch.Restart();
+                var inheritance = subscriber.Invoke(gameObjects);
+
+                _lastCallDuration = _stopwatch.Elapsed;
+                _lastGameObjectResourceInheritance = inheritance
+                    .Select(pair => (GameObjectToString(pair.Key), pair.Value))
+                    .ToArray();
+                
+                ImGui.OpenPopup(nameof(Ipc.GetGameObjectResourceInheritance));
+            }
 
             DrawPopup(nameof(Ipc.GetGameObjectResourcePaths), ref _lastGameObjectResourcePaths, DrawResourcePaths, _lastCallDuration);
             DrawPopup(nameof(Ipc.GetPlayerResourcePaths),     ref _lastPlayerResourcePaths,     DrawResourcePaths, _lastCallDuration);
 
             DrawPopup(nameof(Ipc.GetGameObjectResourcesOfType), ref _lastGameObjectResourcesOfType, DrawResourcesOfType, _lastCallDuration);
             DrawPopup(nameof(Ipc.GetPlayerResourcesOfType),     ref _lastPlayerResourcesOfType,     DrawResourcesOfType, _lastCallDuration);
+            
+            DrawPopup(nameof(Ipc.GetGameObjectResourceInheritance), ref _lastGameObjectResourceInheritance, DrawGameObjectResourceInheritance, _lastCallDuration);
+        }
+
+        private void DrawGameObjectResourceInheritance((string, IReadOnlyList<(string parentPath, string? childPath)>)[] obj)
+        {
+            DrawWithHeaders(obj, inheritance =>
+            {
+                using var table = ImRaii.Table(string.Empty, 2, ImGuiTableFlags.SizingFixedFit);
+                if (!table)
+                    return;
+                
+                ImGui.TableSetupColumn("Parent Path", ImGuiTableColumnFlags.WidthStretch, 0.5f);
+                ImGui.TableSetupColumn("Child Path",  ImGuiTableColumnFlags.WidthStretch, 0.5f);
+                ImGui.TableHeadersRow();
+                
+                foreach (var (parentPath, childPath) in inheritance)
+                {
+                    ImGui.TableNextColumn();
+                    ImGui.TextUnformatted(parentPath);
+                    ImGui.TableNextColumn();
+                    ImGui.TextUnformatted(childPath ?? string.Empty);
+                }
+            });
         }
 
         private static void DrawPopup<T>(string popupId, ref T? result, Action<T> drawResult, TimeSpan duration) where T : class

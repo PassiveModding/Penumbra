@@ -120,8 +120,9 @@ public class PenumbraIpcProviders : IDisposable
     internal readonly FuncProvider<string, string, int, PenumbraApiEc>                                     RemoveTemporaryMod;
 
     // Resource Tree
-    internal readonly FuncProvider<ushort[], IReadOnlyDictionary<string, string[]>?[]>                 GetGameObjectResourcePaths;
-    internal readonly FuncProvider<IReadOnlyDictionary<ushort, IReadOnlyDictionary<string, string[]>>> GetPlayerResourcePaths;
+    internal readonly FuncProvider<ushort[], IReadOnlyDictionary<string, string[]>?[]>                      GetGameObjectResourcePaths;
+    internal readonly FuncProvider<IReadOnlyDictionary<ushort, IReadOnlyDictionary<string, string[]>>>      GetPlayerResourcePaths;
+    internal readonly FuncProvider<ushort[], IReadOnlyDictionary<ushort, IReadOnlyList<(string, string?)>>> GetGameObjectResourceInheritance;
 
     internal readonly FuncProvider<ResourceType, bool, ushort[], IReadOnlyDictionary<nint, (string, string, ChangedItemIcon)>?[]>
         GetGameObjectResourcesOfType;
@@ -250,10 +251,11 @@ public class PenumbraIpcProviders : IDisposable
         RemoveTemporaryMod              = Ipc.RemoveTemporaryMod.Provider(pi, Api.RemoveTemporaryMod);
 
         // ResourceTree
-        GetGameObjectResourcePaths   = Ipc.GetGameObjectResourcePaths.Provider(pi, Api.GetGameObjectResourcePaths);
-        GetPlayerResourcePaths       = Ipc.GetPlayerResourcePaths.Provider(pi, Api.GetPlayerResourcePaths);
-        GetGameObjectResourcesOfType = Ipc.GetGameObjectResourcesOfType.Provider(pi, Api.GetGameObjectResourcesOfType);
-        GetPlayerResourcesOfType     = Ipc.GetPlayerResourcesOfType.Provider(pi, Api.GetPlayerResourcesOfType);
+        GetGameObjectResourcePaths       = Ipc.GetGameObjectResourcePaths.Provider(pi, Api.GetGameObjectResourcePaths);
+        GetPlayerResourcePaths           = Ipc.GetPlayerResourcePaths.Provider(pi, Api.GetPlayerResourcePaths);
+        GetGameObjectResourcesOfType     = Ipc.GetGameObjectResourcesOfType.Provider(pi, Api.GetGameObjectResourcesOfType);
+        GetPlayerResourcesOfType         = Ipc.GetPlayerResourcesOfType.Provider(pi, Api.GetPlayerResourcesOfType);
+        GetGameObjectResourceInheritance = Ipc.GetGameObjectResourceInheritance.Provider(pi, Api.GetGameObjectResourceInheritance);
 
         Tester = new IpcTester(config, dalamud, this, modManager, collections, tempMods, tempCollections, saveService);
 

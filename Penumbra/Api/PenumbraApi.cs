@@ -1046,6 +1046,52 @@ public class PenumbraApi : IDisposable, IPenumbraApi
 
         return Array.ConvertAll(gameObjects, obj => pathDictionaries.TryGetValue(obj, out var pathDict) ? pathDict : null);
     }
+    
+    public IReadOnlyDictionary<ushort, IReadOnlyList<(string, string?)>> GetGameObjectResourceInheritance(ushort[] gameObjects)
+    {
+        var characters       = gameObjects.Select(index => _dalamud.Objects[index]).OfType<Character>();
+        var resourceTrees    = _resourceTreeFactory.FromCharacters(characters, 0);
+        var responseDict = new Dictionary<ushort, IReadOnlyList<(string, string?)>>();
+        
+        foreach (var (character, resourceTree) in resourceTrees)
+        {
+            var results = new List<(string, string?)>();
+            foreach (var node in resourceTree.Nodes)
+            {
+                results.AddRange(CreateChildToParentMappings(node, node.GamePath.ToString()));
+            }
+            
+            // remove duplicates
+            results = results.Distinct().ToList();
+            
+            responseDict.Add(character.ObjectIndex, results);
+        }
+
+        return responseDict.AsReadOnly();
+
+        IEnumerable<(string, string?)> CreateChildToParentMappings(ResourceNode node, string parentPath)
+        {
+            var mappings = new List<(string, string?)>();
+
+            if (node == null)
+                return mappings;
+            
+            // if no children, return parent
+            if (node.Children.Count == 0)
+            {
+                mappings.Add((parentPath, null));
+                return mappings;
+            }
+
+            foreach (var child in node.Children)
+            {
+                mappings.Add((parentPath, child.GamePath.ToString()));
+                mappings.AddRange(CreateChildToParentMappings(child, child.GamePath.ToString()));
+            }
+
+            return mappings;
+        }
+    }
 
     public IReadOnlyDictionary<ushort, IReadOnlyDictionary<string, string[]>> GetPlayerResourcePaths()
     {
