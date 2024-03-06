@@ -172,6 +172,7 @@ public static class ServiceManagerA
             .AddSingleton<ChangedItemsTab>()
             .AddSingleton<EffectiveTab>()
             .AddSingleton<OnScreenTab>()
+            .AddSingleton<OnScreenExporterTab>()
             .AddSingleton<DebugTab>()
             .AddSingleton<MessagesTab>()
             .AddSingleton<ResourceTab>()

@@ -21,6 +21,7 @@ public class ConfigTabBar : IDisposable
     public readonly ResourceTab     Resource;
     public readonly Watcher         Watcher;
     public readonly OnScreenTab     OnScreen;
+    public readonly OnScreenExporterTab OnScreenExporter;
     public readonly MessagesTab     Messages;
 
     public readonly ITab[] Tabs;
@@ -30,7 +31,7 @@ public class ConfigTabBar : IDisposable
 
     public ConfigTabBar(CommunicatorService communicator, SettingsTab settings, ModsTab mods, CollectionsTab collections,
         ChangedItemsTab changedItems, EffectiveTab effective, DebugTab debug, ResourceTab resource, Watcher watcher,
-        OnScreenTab onScreen, MessagesTab messages)
+        OnScreenTab onScreen, OnScreenExporterTab onScreenExporter, MessagesTab messages)
     {
         _communicator = communicator;
 
@@ -43,6 +44,7 @@ public class ConfigTabBar : IDisposable
         Resource     = resource;
         Watcher      = watcher;
         OnScreen     = onScreen;
+        OnScreenExporter = onScreenExporter;
         Messages     = messages;
         Tabs = new ITab[]
         {
@@ -52,6 +54,7 @@ public class ConfigTabBar : IDisposable
             ChangedItems,
             Effective,
             OnScreen,
+            OnScreenExporter,
             Debug,
             Resource,
             Watcher,
@@ -80,6 +83,7 @@ public class ConfigTabBar : IDisposable
             TabType.ChangedItems     => ChangedItems.Label,
             TabType.EffectiveChanges => Effective.Label,
             TabType.OnScreen         => OnScreen.Label,
+            TabType.OnScreenExporter => OnScreenExporter.Label,
             TabType.ResourceWatcher  => Watcher.Label,
             TabType.Debug            => Debug.Label,
             TabType.ResourceManager  => Resource.Label,
@@ -96,6 +100,7 @@ public class ConfigTabBar : IDisposable
         if (label == ChangedItems.Label) return TabType.ChangedItems;
         if (label == Effective.Label)    return TabType.EffectiveChanges;
         if (label == OnScreen.Label)     return TabType.OnScreen;
+        if (label == OnScreenExporter.Label) return TabType.OnScreenExporter;
         if (label == Messages.Label)     return TabType.Messages;
         if (label == Watcher.Label)      return TabType.ResourceWatcher;
         if (label == Debug.Label)        return TabType.Debug;

@@ -20,6 +20,9 @@ public class MaterialExporter
 
         public Dictionary<TextureUsage, Image<Rgba32>> Textures;
         // variant?
+
+        public Vector4? BaseColor;
+        public Vector4? HighlightColor;
     }
 
     /// <summary> Dependency-less material configuration, for use when no material data can be resolved. </summary>
@@ -31,6 +34,7 @@ public class MaterialExporter
     /// <summary> Build a glTF material from a hydrated XIV model, with the provided name. </summary>
     public static MaterialBuilder Export(Material material, string name, IoNotifier notifier)
     {
+        name = $"{name}_{material.Mtrl.ShaderPackage.Name.Replace(".shpk", "")}";
         Penumbra.Log.Debug($"Exporting material \"{name}\".");
         return material.Mtrl.ShaderPackage.Name switch
         {
@@ -227,6 +231,9 @@ public class MaterialExporter
         // Trust me bro.
         const uint categoryHairType = 0x24826489;
         const uint valueFace        = 0x6E5B8F10;
+        
+        var hairCol      = material.BaseColor ?? DefaultHairColor;
+        var highlightCol = material.HighlightColor ?? DefaultHighlightColor;
 
         var isFace = material.Mtrl.ShaderPackage.ShaderKeys
             .Any(key => key is { Category: categoryHairType, Value: valueFace });
@@ -247,7 +254,7 @@ public class MaterialExporter
 
                 for (var x = 0; x < normalSpan.Length; x++)
                 {
-                    var color = Vector4.Lerp(DefaultHairColor, DefaultHighlightColor, maskSpan[x].A / 255f);
+                    var color = Vector4.Lerp(hairCol, highlightCol, maskSpan[x].A / 255f);
                     baseColorSpan[x].FromVector4(color * new Vector4(maskSpan[x].R / 255f));
                     baseColorSpan[x].A = normalSpan[x].A;
 
@@ -284,13 +291,15 @@ public class MaterialExporter
 
                 for (var x = 0; x < normalSpan.Length; x++)
                 {
-                    baseColorSpan[x].FromVector4(DefaultEyeColor * new Vector4(maskSpan[x].R / 255f));
+                    baseColorSpan[x].FromVector4((material.BaseColor ?? DefaultEyeColor) * new Vector4(maskSpan[x].R / 255f));
                     baseColorSpan[x].A = normalSpan[x].A;
 
                     normalSpan[x].A = byte.MaxValue;
                 }
             }
         });
+        
+        Penumbra.Log.Debug($"Exporting iris material \"{name}\". {string.Join("\n", material.Textures.Select(x => x.Key.ToString()))}");
 
         return BuildSharedBase(material, name)
             .WithBaseColor(BuildImage(baseColor, name, "basecolor"))
@@ -312,6 +321,9 @@ public class MaterialExporter
         // TODO: Specular?
         var diffuse = material.Textures[TextureUsage.SamplerDiffuse];
         var normal  = material.Textures[TextureUsage.SamplerNormal];
+        var mask    = material.Textures[TextureUsage.SamplerMask];
+        
+        Penumbra.Log.Debug($"Exporting skin material \"{name}\". {string.Join("\n", material.Textures.Select(x => x.Key.ToString()))}");
 
         // Create a copy of the normal that's the same size as the diffuse for purposes of copying the opacity across.
         var resizedNormal = normal.Clone(context => context.Resize(diffuse.Width, diffuse.Height));
@@ -326,7 +338,8 @@ public class MaterialExporter
                     diffuseSpan[x].A = normalSpan[x].B;
             }
         });
-
+        
+        
         // Clear the blue channel out of the normal now that we're done with it.
         normal.ProcessPixelRows(normalAccessor =>
         {
@@ -338,10 +351,52 @@ public class MaterialExporter
                     normalSpan[x].B = byte.MaxValue;
             }
         });
+        
+        // Masking
+        var resizedMask = mask.Clone(context => context.Resize(diffuse.Width, diffuse.Height));
+        if (material.BaseColor.HasValue || material.HighlightColor.HasValue)
+        {
+            resizedMask.ProcessPixelRows(diffuse, (maskAccessor, diffuseAccessor) =>
+            {
+                for (var y = 0; y < maskAccessor.Height; y++)
+                {
+                    var maskSpan    = maskAccessor.GetRowSpan(y);
+                    var diffuseSpan = diffuseAccessor.GetRowSpan(y);
 
+                    for (var x = 0; x < maskSpan.Length; x++)
+                    {
+                        if (material.BaseColor.HasValue)
+                        {
+                            var intensity = maskSpan[x].R / 255f;
+                            // TODO: Confirm the cutoff. For AuRa face tex, the scales sit ~128 and skin sits at 255. We don't want to apply this to the scaled areas.
+                            if (intensity == 1)
+                            {
+                                var baseColor = material.BaseColor.Value;
+                                var color = diffuseSpan[x].ToVector4();
+                                var lerpCol = Vector4.Lerp(color, baseColor, intensity);
+                                diffuseSpan[x].FromVector4(lerpCol);
+                            }
+                        }
+
+                        if (isFace && material.HighlightColor.HasValue)
+                        {
+                            var lipIntensity = maskSpan[x].B / 255f;
+                            var highlight = material.HighlightColor.Value;
+                            var color = diffuseSpan[x].ToVector4();
+                            // highlight may have alpha also, but since we are modifying the diffuse
+                            var lerpCol = Vector4.Lerp(color, highlight, lipIntensity * highlight.W);
+                            lerpCol.W = color.W;
+                            diffuseSpan[x].FromVector4(lerpCol);
+                        }
+                    }
+                }
+            });
+        }
+        
         return BuildSharedBase(material, name)
             .WithBaseColor(BuildImage(diffuse, name, "basecolor"))
             .WithNormal(BuildImage(normal,     name, "normal"))
+            .WithOcclusion(BuildImage(mask, name, "mask"))
             .WithAlpha(isFace ? AlphaMode.MASK : AlphaMode.OPAQUE, 0.5f);
     }
 

@@ -13,13 +13,15 @@ public class ResourceTreeViewer
     private const ResourceTreeFactory.Flags ResourceTreeFactoryFlags =
         ResourceTreeFactory.Flags.RedactExternalPaths | ResourceTreeFactory.Flags.WithUiData | ResourceTreeFactory.Flags.WithOwnership;
 
-    private readonly Configuration                 _config;
-    private readonly ResourceTreeFactory           _treeFactory;
-    private readonly ChangedItemDrawer             _changedItemDrawer;
-    private readonly int                           _actionCapacity;
-    private readonly Action                        _onRefresh;
-    private readonly Action<ResourceNode, Vector2> _drawActions;
-    private readonly HashSet<nint>                 _unfolded;
+    private readonly Configuration                                _config;
+    private readonly ResourceTreeFactory                          _treeFactory;
+    private readonly ChangedItemDrawer                            _changedItemDrawer;
+    private readonly int                                          _actionCapacity;
+    private readonly Action                                       _onRefresh;
+    private readonly Action<ResourceNode, Vector2>?               _drawActions;
+    private readonly Action<ResourceTree, ResourceNode, Vector2>? _treeNodeDrawActions;
+    private readonly Action<ResourceTree>?                        _treeDrawActions;
+    private readonly HashSet<nint>                                _unfolded;
 
     private TreeCategory                      _categoryFilter;
     private ChangedItemDrawer.ChangedItemIcon _typeFilter;
@@ -30,12 +32,29 @@ public class ResourceTreeViewer
     public ResourceTreeViewer(Configuration config, ResourceTreeFactory treeFactory, ChangedItemDrawer changedItemDrawer,
         int actionCapacity, Action onRefresh, Action<ResourceNode, Vector2> drawActions)
     {
+        _config               = config;
+        _treeFactory          = treeFactory;
+        _changedItemDrawer    = changedItemDrawer;
+        _actionCapacity       = actionCapacity;
+        _onRefresh            = onRefresh;
+        _drawActions          = drawActions;
+        _unfolded             = new HashSet<nint>();
+
+        _categoryFilter = AllCategories;
+        _typeFilter     = ChangedItemDrawer.AllFlags;
+        _nameFilter     = string.Empty;
+    }
+    
+    public ResourceTreeViewer(Configuration config, ResourceTreeFactory treeFactory, ChangedItemDrawer changedItemDrawer,
+        int actionCapacity, Action onRefresh, Action<ResourceTree, ResourceNode, Vector2> drawActions, Action<ResourceTree> treeDrawActions)
+    {
         _config            = config;
         _treeFactory       = treeFactory;
         _changedItemDrawer = changedItemDrawer;
         _actionCapacity    = actionCapacity;
         _onRefresh         = onRefresh;
-        _drawActions       = drawActions;
+        _treeNodeDrawActions = drawActions;
+        _treeDrawActions   = treeDrawActions;
         _unfolded          = new HashSet<nint>();
 
         _categoryFilter = AllCategories;
@@ -89,6 +108,8 @@ public class ResourceTreeViewer
                 using var id = ImRaii.PushId(index);
 
                 ImGui.TextUnformatted($"Collection: {tree.CollectionName}");
+                
+                _treeDrawActions?.Invoke(tree);
 
                 using var table = ImRaii.Table("##ResourceTree", _actionCapacity > 0 ? 4 : 3,
                     ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg);
@@ -103,7 +124,7 @@ public class ResourceTreeViewer
                         (_actionCapacity - 1) * 3 * ImGuiHelpers.GlobalScale + _actionCapacity * ImGui.GetFrameHeight());
                 ImGui.TableHeadersRow();
 
-                DrawNodes(tree.Nodes, 0, unchecked(tree.DrawObjectAddress * 31));
+                DrawNodes(tree, tree.Nodes, 0, unchecked(tree.DrawObjectAddress * 31));
             }
         }
     }
@@ -158,7 +179,7 @@ public class ResourceTreeViewer
             }
         });
 
-    private void DrawNodes(IEnumerable<ResourceNode> resourceNodes, int level, nint pathHash)
+    private void DrawNodes(ResourceTree tree, IEnumerable<ResourceNode> resourceNodes, int level, nint pathHash)
     {
         var debugMode   = _config.DebugMode;
         var frameHeight = ImGui.GetFrameHeight();
@@ -276,11 +297,13 @@ public class ResourceTreeViewer
                 ImGui.TableNextColumn();
                 using var spacing = ImRaii.PushStyle(ImGuiStyleVar.ItemSpacing,
                     ImGui.GetStyle().ItemSpacing with { X = 3 * ImGuiHelpers.GlobalScale });
-                _drawActions(resourceNode, new Vector2(frameHeight));
+                
+                _drawActions?.Invoke(resourceNode, new Vector2(frameHeight));
+                _treeNodeDrawActions?.Invoke(tree, resourceNode, new Vector2(frameHeight));
             }
 
             if (unfolded)
-                DrawNodes(resourceNode.Children, level + 1, unchecked(nodePathHash * 31));
+                DrawNodes(tree, resourceNode.Children, level + 1, unchecked(nodePathHash * 31));
         }
     }
 
